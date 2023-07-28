@@ -38,6 +38,7 @@ async fn async_server_main(args: ServerArgs) {
     let log_storage = MemLogStorage::<_, EmptyData>::new();
     let state_machine = MemStateMachine::new();
     let raft = Raft::new(1, config, transport, log_storage, state_machine).unwrap();
+    raft.initialize_node(args.addr).await.unwrap();
     raft.join().await.unwrap();
     raft.shutdown().await.unwrap();
 }

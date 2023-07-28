@@ -52,30 +52,28 @@ where
 
     pub async fn append_entries(&self, request: AppendEntriesRequest<N, D>) -> Result<AppendEntriesResponse, Error> {
         let (callback, receiver) = oneshot::channel();
-        let message = Message::AppendEntries {
-            request,
-            callback,
-        };
+        let message = Message::AppendEntries { request, callback };
         self.tx.send(message)?;
         Ok(receiver.await??)
     }
 
     pub async fn install_snapshot(&self, request: InstallSnapshotRequest) -> Result<InstallSnapshotResponse, Error> {
         let (callback, receiver) = oneshot::channel();
-        let message = Message::InstallSnapshot {
-            request,
-            callback,
-        };
+        let message = Message::InstallSnapshot { request, callback };
         self.tx.send(message)?;
         Ok(receiver.await??)
     }
 
     pub async fn request_vote(&self, request: RequestVoteRequest) -> Result<RequestVoteResponse, Error> {
         let (callback, receiver) = oneshot::channel();
-        let message = Message::RequestVote {
-            request,
-            callback,
-        };
+        let message = Message::RequestVote { request, callback };
+        self.tx.send(message)?;
+        Ok(receiver.await??)
+    }
+
+    pub async fn initialize_node(&self, node: N) -> Result<(), Error> {
+        let (callback, receiver) = oneshot::channel();
+        let message = Message::InitializeNode { node, callback };
         self.tx.send(message)?;
         Ok(receiver.await??)
     }

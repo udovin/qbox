@@ -1,10 +1,11 @@
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use super::{Error, Transport, LogStorage, StateMachine, Message, Config, NodeId, MembershipConfig, Entry, Node, Data, Response, NormalEntry, EntryPayload};
+use super::{Error, Transport, LogStorage, StateMachine, Message, Config, NodeId, MembershipConfig, Entry, Node, Data, Response, NormalEntry, EntryPayload, InstallSnapshotRequest, InstallSnapshotResponse, RequestVoteRequest, RequestVoteResponse, AppendEntriesRequest, AppendEntriesResponse, HardState};
 
 pub enum State {
     NonVoter,
@@ -153,18 +154,147 @@ where
     }
 
     async fn run_leader(&mut self) -> Result<(), Error> {
-        Err("not implemented leader state")?
+        loop {
+            if !matches!(self.target_state, State::Leader) {
+                return Ok(());
+            }
+            tokio::select! {
+                Some(message) = self.rx.recv() => match message {
+                    Message::AppendEntries{request, callback} => {
+                        let _ = callback.send(self.handle_append_entries(request).await);
+                    }
+                    Message::RequestVote{request, callback} => {
+                        let _ = callback.send(self.handle_request_vote(request).await);
+                    }
+                    Message::InstallSnapshot{request, callback} => {
+                        let _ = callback.send(self.handle_install_snapshot(request).await);
+                    }
+                    Message::InitializeNode{callback, ..} => {
+                        let _ = callback.send(Err("node already initialized".into()));
+                    }
+                },
+                Ok(_) = &mut self.rx_shutdown => {
+                    self.target_state = State::Shutdown;
+                }
+            }
+        }
     }
 
     async fn run_candidate(&mut self) -> Result<(), Error> {
-        Err("not implemented candidate state")?
+        loop {
+            if !matches!(self.target_state, State::Candidate) {
+                return Ok(());
+            }
+            tokio::select! {
+                Some(message) = self.rx.recv() => match message {
+                    Message::AppendEntries{request, callback} => {
+                        let _ = callback.send(self.handle_append_entries(request).await);
+                    }
+                    Message::RequestVote{request, callback} => {
+                        let _ = callback.send(self.handle_request_vote(request).await);
+                    }
+                    Message::InstallSnapshot{request, callback} => {
+                        let _ = callback.send(self.handle_install_snapshot(request).await);
+                    }
+                    Message::InitializeNode{callback, ..} => {
+                        let _ = callback.send(Err("node already initialized".into()));
+                    }
+                },
+                Ok(_) = &mut self.rx_shutdown => {
+                    self.target_state = State::Shutdown;
+                }
+            }
+        }
     }
 
     async fn run_follower(&mut self) -> Result<(), Error> {
-        Err("not implemented follower state")?
+        loop {
+            if !matches!(self.target_state, State::Follower) {
+                return Ok(());
+            }
+            tokio::select! {
+                Some(message) = self.rx.recv() => match message {
+                    Message::AppendEntries{request, callback} => {
+                        let _ = callback.send(self.handle_append_entries(request).await);
+                    }
+                    Message::RequestVote{request, callback} => {
+                        let _ = callback.send(self.handle_request_vote(request).await);
+                    }
+                    Message::InstallSnapshot{request, callback} => {
+                        let _ = callback.send(self.handle_install_snapshot(request).await);
+                    }
+                    Message::InitializeNode{callback, ..} => {
+                        let _ = callback.send(Err("node already initialized".into()));
+                    }
+                },
+                Ok(_) = &mut self.rx_shutdown => {
+                    self.target_state = State::Shutdown;
+                }
+            }
+        }
     }
 
     async fn run_non_voter(&mut self) -> Result<(), Error> {
-        Err("not implemented non voter state")?
+        loop {
+            if !matches!(self.target_state, State::NonVoter) {
+                return Ok(());
+            }
+            tokio::select! {
+                Some(message) = self.rx.recv() => match message {
+                    Message::AppendEntries{request, callback} => {
+                        let _ = callback.send(self.handle_append_entries(request).await);
+                    }
+                    Message::RequestVote{request, callback} => {
+                        let _ = callback.send(self.handle_request_vote(request).await);
+                    }
+                    Message::InstallSnapshot{request, callback} => {
+                        let _ = callback.send(self.handle_install_snapshot(request).await);
+                    }
+                    Message::InitializeNode{node, callback} => {
+                        let _ = callback.send(self.handle_initialize_node(node).await);
+                    }
+                },
+                Ok(_) = &mut self.rx_shutdown => {
+                    self.target_state = State::Shutdown;
+                }
+            }
+        }
+    }
+
+    async fn handle_append_entries(&mut self, request: AppendEntriesRequest<N, D>) -> Result<AppendEntriesResponse, Error> {
+        todo!()
+    }
+
+    async fn handle_request_vote(&mut self, request: RequestVoteRequest) -> Result<RequestVoteResponse, Error> {
+        todo!()
+    }
+
+    async fn handle_install_snapshot(&mut self, request: InstallSnapshotRequest) -> Result<InstallSnapshotResponse, Error> {
+        todo!()
+    }
+
+    async fn handle_initialize_node(&mut self, node: N) -> Result<(), Error> {
+        if self.last_log_index != 0 || self.current_term != 0 {
+            Err("not allowed")?
+        }
+        let mut members = HashMap::new();
+        members.insert(self.id, node);
+        self.membership = MembershipConfig {
+            members,
+            members_after_consensus: None,
+        };
+        self.current_term += 1;
+        self.voted_for = Some(self.id);
+        self.target_state = State::Leader;
+        self.save_hard_state().await?;
+        Ok(())
+    }
+
+    async fn save_hard_state(&mut self) -> Result<(), Error> {
+        let hs = HardState {
+            current_term: self.current_term,
+            voted_for: self.voted_for,
+        };
+        self.state_machine.save_hard_state(hs).await
     }
 }

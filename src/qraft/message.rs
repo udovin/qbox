@@ -19,6 +19,10 @@ pub enum Message<N: Node, D: Data> {
         request: InstallSnapshotRequest,
         callback: oneshot::Sender<Result<InstallSnapshotResponse, Error>>,
     },
+    InitializeNode {
+        node: N,
+        callback: oneshot::Sender<Result<(), Error>>,
+    },
     // // From client.
     // ClientReadRequest {},
     // ClientWriteRequest {},
