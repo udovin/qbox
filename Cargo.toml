@@ -1,0 +1,12 @@
+[package]
+name = "qbox"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1.72"
+bincode = "1.3.3"
+clap = { version = "4.3.16", features = ["derive"] }
+rand = "0.8.5"
+serde = { version = "1.0.177", features = ["derive"] }
+tokio = { version = "1.29.1", features = ["rt-multi-thread", "macros", "sync", "net", "io-util"] }
