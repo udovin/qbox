@@ -7,3 +7,5 @@ pub trait Node: Clone + Send + Sync + 'static {}
 pub trait Data: Send + Sync + 'static {}
 
 pub trait Response: Send + Sync + 'static {}
+
+impl Response for () {}

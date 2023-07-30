@@ -1,14 +1,17 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 use clap::{Parser, Subcommand, Args};
 use qbox::qraft::tcp_transport::TcpTransport;
-use qbox::qraft::{Raft, Config, Data};
+use qbox::qraft::{Raft, Config, Data, LogId};
 use qbox::qraft::mem_storage::{MemStateMachine, MemLogStorage};
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 
 #[derive(Args, Debug)]
 struct ServerArgs {
     #[arg(short, long, default_value = "0.0.0.0:4242")]
     addr: SocketAddr,
+    #[arg(long, default_value = "0.0.0.0:4243")]
+    raft_addr: SocketAddr,
     #[arg(long, default_value = "false")]
     init: bool,
     #[arg(long)]
@@ -26,20 +29,25 @@ struct Cli {
     command: Command,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct EmptyData {}
 
 impl Data for EmptyData {}
 
 async fn async_server_main(args: ServerArgs) {
-    let _ = args;
     let config = Config::default();
     let transport = TcpTransport::new();
     let log_storage = MemLogStorage::<_, EmptyData>::new();
     let state_machine = MemStateMachine::new();
     let raft = Raft::new(1, config, transport, log_storage, state_machine).unwrap();
-    raft.initialize_node(args.addr).await.unwrap();
-    raft.join().await.unwrap();
+    if let Some(addr) = args.join {
+
+    } else if args.init {
+        raft.initialize_node(args.raft_addr).await.unwrap();
+    }
+    let raft = Arc::new(raft);
+    let server = TcpTransport::spawn(args.raft_addr, raft.clone());
+    tokio::join!(raft.join(), server).0.unwrap();
     raft.shutdown().await.unwrap();
 }
 

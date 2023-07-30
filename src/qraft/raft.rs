@@ -13,7 +13,7 @@ where
     LS: LogStorage<N, D>,
     SM: StateMachine<N, D, R>,
 {
-    tx: mpsc::UnboundedSender<Message<N, D>>,
+    tx: mpsc::UnboundedSender<Message<N, D, R>>,
     tx_shutdown: Mutex<Option<oneshot::Sender<()>>>,
     node_handle: Mutex<Option<JoinHandle<Result<(), Error>>>>,
     _phantom: (
@@ -50,32 +50,39 @@ where
         })
     }
 
-    pub async fn append_entries(&self, request: AppendEntriesRequest<N, D>) -> Result<AppendEntriesResponse, Error> {
-        let (callback, receiver) = oneshot::channel();
-        let message = Message::AppendEntries { request, callback };
+    pub async fn client_write(&self, data: D) -> Result<R, Error> {
+        let (tx, rx) = oneshot::channel();
+        let message = Message::ClientWriteRequest { data, tx };
         self.tx.send(message)?;
-        Ok(receiver.await??)
+        Ok(rx.await??)
+    }
+
+    pub async fn append_entries(&self, request: AppendEntriesRequest<N, D>) -> Result<AppendEntriesResponse, Error> {
+        let (tx, rx) = oneshot::channel();
+        let message = Message::AppendEntries { request, tx };
+        self.tx.send(message)?;
+        Ok(rx.await??)
     }
 
     pub async fn install_snapshot(&self, request: InstallSnapshotRequest) -> Result<InstallSnapshotResponse, Error> {
-        let (callback, receiver) = oneshot::channel();
-        let message = Message::InstallSnapshot { request, callback };
+        let (tx, rx) = oneshot::channel();
+        let message = Message::InstallSnapshot { request, tx };
         self.tx.send(message)?;
-        Ok(receiver.await??)
+        Ok(rx.await??)
     }
 
     pub async fn request_vote(&self, request: RequestVoteRequest) -> Result<RequestVoteResponse, Error> {
-        let (callback, receiver) = oneshot::channel();
-        let message = Message::RequestVote { request, callback };
+        let (tx, rx) = oneshot::channel();
+        let message = Message::RequestVote { request, tx };
         self.tx.send(message)?;
-        Ok(receiver.await??)
+        Ok(rx.await??)
     }
 
     pub async fn initialize_node(&self, node: N) -> Result<(), Error> {
-        let (callback, receiver) = oneshot::channel();
-        let message = Message::InitializeNode { node, callback };
+        let (tx, rx) = oneshot::channel();
+        let message = Message::InitializeNode { node, tx };
         self.tx.send(message)?;
-        Ok(receiver.await??)
+        Ok(rx.await??)
     }
 
     pub async fn join(&self) -> Result<(), Error> {

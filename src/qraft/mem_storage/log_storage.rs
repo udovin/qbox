@@ -1,17 +1,17 @@
 use std::collections::BTreeMap;
 
-use crate::qraft::{LogStorage, LogState, Error, Entry, Data, Node};
+use crate::qraft::{LogStorage, LogState, Error, Entry, Data, Node, LogId};
 
 pub struct MemLogStorage<N: Node, D: Data> {
     logs: BTreeMap<u64, Entry<N, D>>,
-    commited_index: u64,
+    committed_index: u64,
 }
 
 impl<N: Node, D: Data> MemLogStorage<N, D> {
     pub fn new() -> Self {
         Self {
             logs: BTreeMap::new(),
-            commited_index: 0,
+            committed_index: 0,
         }
     }
 }
@@ -21,10 +21,9 @@ impl<N: Node + Clone, D: Data + Clone> LogStorage<N, D> for MemLogStorage<N, D> 
     async fn get_log_state(&self) -> Result<LogState, Error> {
         Ok(match self.logs.last_key_value() {
             Some(last_log) => LogState {
-                last_index: last_log.1.index,
-                last_term: last_log.1.term,
+                last_log_id: last_log.1.log_id,
             },
-            None => LogState { last_index: 0, last_term: 0 },
+            None => LogState::default(),
         })
     }
 
@@ -34,21 +33,21 @@ impl<N: Node + Clone, D: Data + Clone> LogStorage<N, D> for MemLogStorage<N, D> 
 
     async fn append_entries(&mut self, entries: Vec<Entry<N, D>>) -> Result<(), Error> {
         for entry in entries.into_iter() {
-            self.logs.insert(entry.index, entry);
+            self.logs.insert(entry.log_id.index, entry);
         }
         Ok(())
     }
 
-    async fn get_commited_index(&self) -> Result<u64, Error> {
-        Ok(self.commited_index)
+    async fn get_committed_index(&self) -> Result<u64, Error> {
+        Ok(self.committed_index)
     }
 
-    async fn save_commited_index(&mut self, index: u64) -> Result<(), Error> {
+    async fn save_committed_index(&mut self, index: u64) -> Result<(), Error> {
         let state = self.get_log_state().await?;
-        if state.last_index < index {
-            Err(format!("commited index is greater than last_index: {} > {}", index, state.last_index))?
+        if state.last_log_id.index < index {
+            Err(format!("commited index is greater than last_index: {} > {}", index, state.last_log_id.index))?
         }
-        self.commited_index = index;
+        self.committed_index = index;
         Ok(())
     }
     
