@@ -8,4 +8,5 @@ pub trait Data: Send + Sync + 'static {}
 
 pub trait Response: Send + Sync + 'static {}
 
+impl Node for () {}
 impl Response for () {}

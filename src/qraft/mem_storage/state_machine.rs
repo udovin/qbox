@@ -1,6 +1,24 @@
-use crate::qraft::{StateMachine, HardState, Error, MembershipConfig, Node, Response, Data, LogId, Entry, EntryPayload};
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::qraft::{StateMachine, HardState, Error, MembershipConfig, Node, Data, LogId, Entry, EntryPayload, Response};
+
+#[derive(Clone, Serialize, Deserialize)]
+pub enum Action {
+    Set { key: String, value: String },
+    Delete { key: String },
+}
+
+impl Data for Action {}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ActionResponse(Option<String>);
+
+impl Response for ActionResponse {}
 
 pub struct MemStateMachine<N: Node> {
+    data: HashMap<String, String>,
     hard_state: HardState,
     membership: MembershipConfig<N>,
     applied_log_id: LogId,
@@ -9,6 +27,7 @@ pub struct MemStateMachine<N: Node> {
 impl<N: Node> MemStateMachine<N> {
     pub fn new() -> Self {
         Self {
+            data: HashMap::new(),
             hard_state: HardState::default(),
             membership: MembershipConfig::default(),
             applied_log_id: LogId::default(),
@@ -17,7 +36,7 @@ impl<N: Node> MemStateMachine<N> {
 }
 
 #[async_trait::async_trait]
-impl<N: Node + Clone, D: Data> StateMachine<N, D, ()> for MemStateMachine<N> {
+impl<N: Node + Clone> StateMachine<N, Action, ActionResponse> for MemStateMachine<N> {
     async fn get_applied_log_id(&self) -> Result<LogId, Error> {
         Ok(self.applied_log_id)
     }
@@ -26,7 +45,7 @@ impl<N: Node + Clone, D: Data> StateMachine<N, D, ()> for MemStateMachine<N> {
         Ok(self.membership.clone())
     }
 
-    async fn apply_entries(&mut self, entires: Vec<Entry<N, D>>) -> Result<Vec<()>, Error> {
+    async fn apply_entries(&mut self, entires: Vec<Entry<N, Action>>) -> Result<Vec<ActionResponse>, Error> {
         let mut resp = Vec::new();
         for entry in entires.into_iter() {
             assert!(self.applied_log_id.index < entry.log_id.index);
@@ -36,7 +55,14 @@ impl<N: Node + Clone, D: Data> StateMachine<N, D, ()> for MemStateMachine<N> {
                     self.membership = config_change.membership;
                 }
                 EntryPayload::Normal(normal) => {
-                    resp.push(());
+                    match normal.data {
+                        Action::Set { key, value } => {
+                            resp.push(ActionResponse(self.data.insert(key, value)));
+                        }
+                        Action::Delete { key } => {
+                            resp.push(ActionResponse(self.data.remove(&key)));
+                        }
+                    };
                 }
             };
             self.applied_log_id = entry.log_id;

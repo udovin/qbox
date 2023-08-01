@@ -28,7 +28,7 @@ pub trait LogStorage<N: Node, D: Data>: Send + Sync + 'static {
     // Purge logs up to `index`, inclusive (`entry.index` <= `index`).
     async fn purge(&mut self, index: u64) -> Result<(), Error>;
 
-    // Truncate logs since `index`, inclusive.
+    // Truncate logs since `index`, inclusive (`entry.index` >= `index`).
     async fn truncate(&mut self, index: u64) -> Result<(), Error>;
 }
 

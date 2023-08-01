@@ -6,7 +6,7 @@ use tokio::sync::oneshot;
 use super::{Error, Data, Node, NodeId, Response};
 
 pub enum Message<N: Node, D: Data, R: Response> {
-    // From leader.
+    // Raft messages.
     AppendEntries {
         request: AppendEntriesRequest<N, D>,
         tx: oneshot::Sender<Result<AppendEntriesResponse, Error>>,
@@ -19,13 +19,17 @@ pub enum Message<N: Node, D: Data, R: Response> {
         request: InstallSnapshotRequest,
         tx: oneshot::Sender<Result<InstallSnapshotResponse, Error>>,
     },
-    InitializeNode {
+    // Managing messages.
+    InitCluster {
+        tx: oneshot::Sender<Result<(), Error>>,
+    },
+    AddNode {
+        id: NodeId,
         node: N,
         tx: oneshot::Sender<Result<(), Error>>,
     },
-    // From client.
-    // ClientReadRequest {},
-    ClientWriteRequest {
+    // Client messages.
+    ApplyEntry {
         data: D,
         tx: oneshot::Sender<Result<R, Error>>,
     },
@@ -34,7 +38,7 @@ pub enum Message<N: Node, D: Data, R: Response> {
 #[derive(Serialize, Deserialize)]
 pub struct AppendEntriesRequest<N: Node, D: Data> {
     pub term: u64,
-    pub leader_id: u64,
+    pub leader_id: NodeId,
     pub prev_log_id: LogId,
     pub entries: Vec<Entry<N, D>>,
     pub leader_commit: u64,
@@ -49,7 +53,7 @@ pub struct AppendEntriesResponse {
 #[derive(Serialize, Deserialize)]
 pub struct InstallSnapshotRequest {
     pub term: u64,
-    pub leader_id: u64,
+    pub leader_id: NodeId,
     pub last_included_log_id: LogId,
     pub offset: u64,
     pub data: Vec<u8>,
@@ -64,7 +68,7 @@ pub struct InstallSnapshotResponse {
 #[derive(Serialize, Deserialize)]
 pub struct RequestVoteRequest {
     pub term: u64,
-    pub candidate_id: u64,
+    pub candidate_id: NodeId,
     pub last_log_id: LogId,
 }
 

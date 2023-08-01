@@ -25,6 +25,7 @@ where
     SM: StateMachine<N, D, R>,
 {
     id: NodeId,
+    node: N,
     config: Config,
     transport: TR,
     log_storage: LS,
@@ -55,6 +56,7 @@ where
 {
     pub fn spawn(
         id: NodeId,
+        node: N,
         config: Config,
         transport: TR,
         log_storage: LS,
@@ -64,6 +66,7 @@ where
     ) -> JoinHandle<Result<(), Error>> {
         let this = Self {
             id,
+            node,
             config,
             transport,
             log_storage,
@@ -171,11 +174,14 @@ where
                     Message::InstallSnapshot{request, tx} => {
                         let _ = tx.send(self.handle_install_snapshot(request).await);
                     }
-                    Message::InitializeNode{tx, ..} => {
+                    Message::InitCluster{tx, ..} => {
                         let _ = tx.send(Err("node already initialized".into()));
                     }
-                    Message::ClientWriteRequest{..} => {
-                        todo!()
+                    Message::AddNode{id, node, tx} => {
+                        let _ = tx.send(self.handle_add_node(id, node).await);
+                    }
+                    Message::ApplyEntry{data, tx} => {
+                        let _ = tx.send(self.handle_apply_entry(data).await);
                     }
                 },
                 Ok(_) = &mut self.rx_shutdown => {
@@ -201,11 +207,14 @@ where
                     Message::InstallSnapshot{request, tx} => {
                         let _ = tx.send(self.handle_install_snapshot(request).await);
                     }
-                    Message::InitializeNode{tx, ..} => {
+                    Message::InitCluster{tx, ..} => {
                         let _ = tx.send(Err("node already initialized".into()));
                     }
-                    Message::ClientWriteRequest{..} => {
-                        todo!()
+                    Message::AddNode{tx, ..} => {
+                        let _ = tx.send(Err("node is not leader".into()));
+                    }
+                    Message::ApplyEntry{tx, ..} => {
+                        let _ = tx.send(Err("node is not leader".into()));
                     }
                 },
                 Ok(_) = &mut self.rx_shutdown => {
@@ -231,11 +240,14 @@ where
                     Message::InstallSnapshot{request, tx} => {
                         let _ = tx.send(self.handle_install_snapshot(request).await);
                     }
-                    Message::InitializeNode{tx, ..} => {
+                    Message::InitCluster{tx, ..} => {
                         let _ = tx.send(Err("node already initialized".into()));
                     }
-                    Message::ClientWriteRequest{..} => {
-                        todo!()
+                    Message::AddNode{tx, ..} => {
+                        let _ = tx.send(Err("node is not leader".into()));
+                    }
+                    Message::ApplyEntry{tx, ..} => {
+                        let _ = tx.send(Err("node is not leader".into()));
                     }
                 },
                 Ok(_) = &mut self.rx_shutdown => {
@@ -261,11 +273,14 @@ where
                     Message::InstallSnapshot{request, tx} => {
                         let _ = tx.send(self.handle_install_snapshot(request).await);
                     }
-                    Message::InitializeNode{node, tx} => {
-                        let _ = tx.send(self.handle_initialize_node(node).await);
+                    Message::InitCluster{tx} => {
+                        let _ = tx.send(self.handle_init_cluster().await);
                     }
-                    Message::ClientWriteRequest{..} => {
-                        todo!()
+                    Message::AddNode{tx, ..} => {
+                        let _ = tx.send(Err("node is not leader".into()));
+                    }
+                    Message::ApplyEntry{tx, ..} => {
+                        let _ = tx.send(Err("node is not leader".into()));
                     }
                 },
                 Ok(_) = &mut self.rx_shutdown => {
@@ -323,12 +338,12 @@ where
         todo!()
     }
 
-    async fn handle_initialize_node(&mut self, node: N) -> Result<(), Error> {
+    async fn handle_init_cluster(&mut self) -> Result<(), Error> {
         if self.last_log_id.index != 0 {
             Err("not allowed")?
         }
         let mut members = HashMap::new();
-        members.insert(self.id, node);
+        members.insert(self.id, self.node.clone());
         self.membership = MembershipConfig {
             members,
             members_after_consensus: None,
@@ -338,6 +353,14 @@ where
         self.target_state = State::Leader;
         self.save_hard_state().await?;
         Ok(())
+    }
+
+    async fn handle_add_node(&mut self, id: NodeId, node: N) -> Result<(), Error> {
+        todo!()
+    }
+
+    async fn handle_apply_entry(&mut self, data: D) -> Result<R, Error> {
+        todo!()
     }
 
     async fn save_hard_state(&mut self) -> Result<(), Error> {

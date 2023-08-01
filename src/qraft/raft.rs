@@ -33,10 +33,10 @@ where
     LS: LogStorage<N, D>,
     SM: StateMachine<N, D, R>,
 {
-    pub fn new(id: NodeId, config: Config, transport: TR, log_storage: LS, state_machine: SM) -> Result<Self, Error> {
+    pub fn new(id: NodeId, node: N, config: Config, transport: TR, log_storage: LS, state_machine: SM) -> Result<Self, Error> {
         let (tx, rx) = mpsc::unbounded_channel();
         let (tx_shutdown, rx_shutdown) = oneshot::channel();
-        let node_handle = RaftNode::<N, D, R, TR, LS, SM>::spawn(id, config, transport, log_storage, state_machine, rx, rx_shutdown);
+        let node_handle = RaftNode::<N, D, R, TR, LS, SM>::spawn(id, node, config, transport, log_storage, state_machine, rx, rx_shutdown);
         Ok(Self {
             tx,
             tx_shutdown: Mutex::new(Some(tx_shutdown)),
@@ -50,9 +50,9 @@ where
         })
     }
 
-    pub async fn client_write(&self, data: D) -> Result<R, Error> {
+    pub async fn apply_entry(&self, data: D) -> Result<R, Error> {
         let (tx, rx) = oneshot::channel();
-        let message = Message::ClientWriteRequest { data, tx };
+        let message = Message::ApplyEntry { data, tx };
         self.tx.send(message)?;
         Ok(rx.await??)
     }
@@ -78,9 +78,16 @@ where
         Ok(rx.await??)
     }
 
-    pub async fn initialize_node(&self, node: N) -> Result<(), Error> {
+    pub async fn init_cluster(&self) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
-        let message = Message::InitializeNode { node, tx };
+        let message = Message::InitCluster { tx };
+        self.tx.send(message)?;
+        Ok(rx.await??)
+    }
+
+    pub async fn add_node(&self, id: NodeId, node: N) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        let message = Message::AddNode { id, node, tx };
         self.tx.send(message)?;
         Ok(rx.await??)
     }
