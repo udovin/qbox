@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use super::{Error, Data, Node, NodeId, Response};
+use super::{Data, Error, Node, NodeId, Response};
 
 pub enum Message<N: Node, D: Data, R: Response> {
     // Raft messages.

@@ -1,14 +1,18 @@
+use serde::de::DeserializeOwned;
+use serde::ser::Serialize;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use serde::ser::Serialize;
-use serde::de::DeserializeOwned;
 
-use tokio::net::{TcpStream, TcpListener};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
-use crate::qraft::{Transport, Connection, NodeId, Error, Node, Data, RequestVoteRequest, RequestVoteResponse, AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotResponse, InstallSnapshotRequest, Raft, Response, LogStorage, StateMachine};
+use crate::qraft::{
+    AppendEntriesRequest, AppendEntriesResponse, Connection, Data, Error, InstallSnapshotRequest,
+    InstallSnapshotResponse, LogStorage, Node, NodeId, Raft, RequestVoteRequest,
+    RequestVoteResponse, Response, StateMachine, Transport,
+};
 
 impl Node for SocketAddr {}
 
@@ -38,17 +42,26 @@ impl<D: Data + Serialize> TcpConnection<D> {
 
 #[async_trait::async_trait]
 impl<D: Data + Serialize> Connection<SocketAddr, D> for TcpConnection<D> {
-    async fn append_entries(&mut self, request: AppendEntriesRequest<SocketAddr, D>) -> Result<AppendEntriesResponse, Error> {
+    async fn append_entries(
+        &mut self,
+        request: AppendEntriesRequest<SocketAddr, D>,
+    ) -> Result<AppendEntriesResponse, Error> {
         self.write_message(APPEND_ENTRIES, request).await?;
         self.read_message(APPEND_ENTRIES).await
     }
 
-    async fn install_snapshot(&mut self, request: InstallSnapshotRequest) -> Result<InstallSnapshotResponse, Error> {
+    async fn install_snapshot(
+        &mut self,
+        request: InstallSnapshotRequest,
+    ) -> Result<InstallSnapshotResponse, Error> {
         self.write_message(INSTALL_SNAPSHOT, request).await?;
         self.read_message(INSTALL_SNAPSHOT).await
     }
 
-    async fn request_vote(&mut self, request: RequestVoteRequest) -> Result<RequestVoteResponse, Error> {
+    async fn request_vote(
+        &mut self,
+        request: RequestVoteRequest,
+    ) -> Result<RequestVoteResponse, Error> {
         self.write_message(REQUEST_VOTE, request).await?;
         self.read_message(REQUEST_VOTE).await
     }
@@ -58,15 +71,18 @@ pub struct TcpTransport {}
 
 impl TcpTransport {
     pub fn new() -> Self {
-        Self { }
+        Self {}
     }
 
-    pub fn spawn<D, R, LS, SM>(addr: SocketAddr, raft: Arc<Raft<SocketAddr, D, R, TcpTransport, LS, SM>>) -> JoinHandle<Result<(), Error>>
+    pub fn spawn<D, R, LS, SM>(
+        addr: SocketAddr,
+        raft: Arc<Raft<SocketAddr, D, R, TcpTransport, LS, SM>>,
+    ) -> JoinHandle<Result<(), Error>>
     where
         D: Data + Serialize + DeserializeOwned,
         R: Response,
         LS: LogStorage<SocketAddr, D>,
-        SM: StateMachine<SocketAddr, D, R>
+        SM: StateMachine<SocketAddr, D, R>,
     {
         let server = async move {
             let listener = TcpListener::bind(addr).await?;
@@ -78,22 +94,29 @@ impl TcpTransport {
         tokio::spawn(server)
     }
 
-    async fn handle_connection<D, R, LS, SM>(mut stream: TcpStream, raft: Arc<Raft<SocketAddr, D, R, TcpTransport, LS, SM>>) -> Result<(), Error>
+    async fn handle_connection<D, R, LS, SM>(
+        mut stream: TcpStream,
+        raft: Arc<Raft<SocketAddr, D, R, TcpTransport, LS, SM>>,
+    ) -> Result<(), Error>
     where
         D: Data + Serialize + DeserializeOwned,
         R: Response,
         LS: LogStorage<SocketAddr, D>,
-        SM: StateMachine<SocketAddr, D, R>
+        SM: StateMachine<SocketAddr, D, R>,
     {
         loop {
             let read_kind = stream.read_u64().await?;
             match read_kind {
                 APPEND_ENTRIES => {
-                    let response = raft.append_entries(read_message(&mut stream).await?).await?;
+                    let response = raft
+                        .append_entries(read_message(&mut stream).await?)
+                        .await?;
                     write_message(&mut stream, APPEND_ENTRIES, response).await?;
                 }
                 INSTALL_SNAPSHOT => {
-                    let response = raft.install_snapshot(read_message(&mut stream).await?).await?;
+                    let response = raft
+                        .install_snapshot(read_message(&mut stream).await?)
+                        .await?;
                     write_message(&mut stream, INSTALL_SNAPSHOT, response).await?;
                 }
                 REQUEST_VOTE => {
@@ -112,11 +135,16 @@ impl<D: Data + Serialize> Transport<SocketAddr, D> for TcpTransport {
 
     async fn connect(&self, _id: NodeId, node: &SocketAddr) -> Result<TcpConnection<D>, Error> {
         let stream = TcpStream::connect(node).await?;
-        Ok(TcpConnection { stream, _phantom: PhantomData })
+        Ok(TcpConnection {
+            stream,
+            _phantom: PhantomData,
+        })
     }
 }
 
-async fn read_message<S: Unpin + AsyncReadExt, T: DeserializeOwned>(stream: &mut S) -> Result<T, Error> {
+async fn read_message<S: Unpin + AsyncReadExt, T: DeserializeOwned>(
+    stream: &mut S,
+) -> Result<T, Error> {
     let len = stream.read_u64().await?;
     if len > MAX_LEN {
         Err("too large message")?;
@@ -126,7 +154,11 @@ async fn read_message<S: Unpin + AsyncReadExt, T: DeserializeOwned>(stream: &mut
     Ok(bincode::deserialize(bytes.as_slice())?)
 }
 
-async fn write_message<S: Unpin + AsyncWriteExt, T: Serialize>(stream: &mut S, kind: u64, message: T) -> Result<(), Error> {
+async fn write_message<S: Unpin + AsyncWriteExt, T: Serialize>(
+    stream: &mut S,
+    kind: u64,
+    message: T,
+) -> Result<(), Error> {
     let bytes = bincode::serialize(&message)?;
     let len = bytes.len() as u64;
     if len > MAX_LEN {

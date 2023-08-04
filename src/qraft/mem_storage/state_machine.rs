@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::qraft::{StateMachine, HardState, Error, MembershipConfig, Node, Data, LogId, Entry, EntryPayload, Response};
+use crate::qraft::{
+    Data, Entry, EntryPayload, Error, HardState, LogId, MembershipConfig, Node, Response,
+    StateMachine,
+};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Action {
@@ -33,6 +36,10 @@ impl<N: Node> MemStateMachine<N> {
             applied_log_id: LogId::default(),
         }
     }
+
+    pub fn get(&self, key: &String) -> Option<&String> {
+        self.data.get(key)
+    }
 }
 
 #[async_trait::async_trait]
@@ -45,7 +52,10 @@ impl<N: Node + Clone> StateMachine<N, Action, ActionResponse> for MemStateMachin
         Ok(self.membership.clone())
     }
 
-    async fn apply_entries(&mut self, entires: Vec<Entry<N, Action>>) -> Result<Vec<ActionResponse>, Error> {
+    async fn apply_entries(
+        &mut self,
+        entires: Vec<Entry<N, Action>>,
+    ) -> Result<Vec<ActionResponse>, Error> {
         let mut resp = Vec::new();
         for entry in entires.into_iter() {
             assert!(self.applied_log_id.index < entry.log_id.index);

@@ -5,7 +5,12 @@ use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use super::{Error, Transport, LogStorage, StateMachine, Message, Config, NodeId, MembershipConfig, Entry, Node, Data, Response, NormalEntry, EntryPayload, InstallSnapshotRequest, InstallSnapshotResponse, RequestVoteRequest, RequestVoteResponse, AppendEntriesRequest, AppendEntriesResponse, HardState, LogId, ConfigChangeEntry};
+use super::{
+    AppendEntriesRequest, AppendEntriesResponse, Config, ConfigChangeEntry, Data, Entry,
+    EntryPayload, Error, HardState, InstallSnapshotRequest, InstallSnapshotResponse, LogId,
+    LogStorage, MembershipConfig, Message, Node, NodeId, RequestVoteRequest,
+    RequestVoteResponse, Response, StateMachine, Transport,
+};
 
 pub enum State {
     NonVoter,
@@ -101,16 +106,22 @@ where
             self.committed_index = self.last_applied_log_id.index;
         }
         if self.last_applied_log_id.index < self.committed_index {
-            let entries = self.log_storage.read_entries(self.last_applied_log_id.index+1, self.committed_index+1).await?;
+            let entries = self
+                .log_storage
+                .read_entries(self.last_applied_log_id.index + 1, self.committed_index + 1)
+                .await?;
             self.state_machine.apply_entries(entries).await?;
             self.last_applied_log_id = self.state_machine.get_applied_log_id().await?;
             assert!(self.last_applied_log_id.index == self.committed_index);
         }
         if self.last_log_id.index < self.last_applied_log_id.index {
-            self.log_storage.purge(self.last_applied_log_id.index).await?;
+            self.log_storage
+                .purge(self.last_applied_log_id.index)
+                .await?;
             self.last_log_id = self.last_applied_log_id;
         }
-        let is_only_configured_member = self.membership.members.len() == 1 && self.membership.members.contains_key(&self.id);
+        let is_only_configured_member =
+            self.membership.members.len() == 1 && self.membership.members.contains_key(&self.id);
         if is_only_configured_member {
             self.target_state = State::Leader;
         } else if self.membership.members.contains_key(&self.id) {
@@ -145,13 +156,13 @@ where
     async fn commit_initial_leader_entry(&mut self) -> Result<(), Error> {
         let mut payload = EntryPayload::Blank;
         if self.last_log_id.index == 0 {
-            payload = EntryPayload::ConfigChange(ConfigChangeEntry{
+            payload = EntryPayload::ConfigChange(ConfigChangeEntry {
                 membership: self.membership.clone(),
             });
         }
         self.append_entry(payload).await?;
         println!("Appended: initial_leader_entry");
-        return Ok(())
+        return Ok(());
     }
 
     async fn run_leader(&mut self) -> Result<(), Error> {
@@ -290,7 +301,10 @@ where
         }
     }
 
-    async fn handle_append_entries(&mut self, request: AppendEntriesRequest<N, D>) -> Result<AppendEntriesResponse, Error> {
+    async fn handle_append_entries(
+        &mut self,
+        request: AppendEntriesRequest<N, D>,
+    ) -> Result<AppendEntriesResponse, Error> {
         if request.term < self.current_term {
             return Ok(AppendEntriesResponse {
                 term: self.current_term,
@@ -309,20 +323,27 @@ where
         if Some(request.leader_id) != self.current_leader {
             self.current_leader = Some(request.leader_id);
         }
-        if matches!(self.target_state, State::Leader) || matches!(self.target_state, State::Candidate) {
+        if matches!(self.target_state, State::Leader)
+            || matches!(self.target_state, State::Candidate)
+        {
             self.target_state = State::Follower;
         }
         if request.prev_log_id == self.last_log_id {
             self.log_storage.append_entries(request.entries).await?;
             if self.last_applied_log_id.index < self.committed_index {
-                self.log_storage.save_committed_index(self.committed_index).await?;
-                let entries = self.log_storage.read_entries(self.last_applied_log_id.index + 1, self.committed_index + 1).await?;
+                self.log_storage
+                    .save_committed_index(self.committed_index)
+                    .await?;
+                let entries = self
+                    .log_storage
+                    .read_entries(self.last_applied_log_id.index + 1, self.committed_index + 1)
+                    .await?;
                 self.state_machine.apply_entries(entries).await?;
             }
             return Ok(AppendEntriesResponse {
                 term: self.current_term,
                 success: true,
-            })
+            });
         }
         Ok(AppendEntriesResponse {
             term: self.current_term,
@@ -330,11 +351,17 @@ where
         })
     }
 
-    async fn handle_request_vote(&mut self, request: RequestVoteRequest) -> Result<RequestVoteResponse, Error> {
+    async fn handle_request_vote(
+        &mut self,
+        request: RequestVoteRequest,
+    ) -> Result<RequestVoteResponse, Error> {
         todo!()
     }
 
-    async fn handle_install_snapshot(&mut self, request: InstallSnapshotRequest) -> Result<InstallSnapshotResponse, Error> {
+    async fn handle_install_snapshot(
+        &mut self,
+        request: InstallSnapshotRequest,
+    ) -> Result<InstallSnapshotResponse, Error> {
         todo!()
     }
 

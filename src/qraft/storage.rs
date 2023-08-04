@@ -1,6 +1,6 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
-use super::{Error, MembershipConfig, Entry, Node, Data, Response, LogId};
+use super::{Data, Entry, Error, LogId, MembershipConfig, Node, Response};
 
 #[derive(Default)]
 pub struct LogState {

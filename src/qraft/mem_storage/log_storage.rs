@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::qraft::{LogStorage, LogState, Error, Entry, Data, Node};
+use crate::qraft::{Data, Entry, Error, LogState, LogStorage, Node};
 
 pub struct MemLogStorage<N: Node, D: Data> {
     logs: BTreeMap<u64, Entry<N, D>>,
@@ -45,12 +45,15 @@ impl<N: Node + Clone, D: Data + Clone> LogStorage<N, D> for MemLogStorage<N, D> 
     async fn save_committed_index(&mut self, index: u64) -> Result<(), Error> {
         let state = self.get_log_state().await?;
         if state.last_log_id.index < index {
-            Err(format!("commited index is greater than last_index: {} > {}", index, state.last_log_id.index))?
+            Err(format!(
+                "commited index is greater than last_index: {} > {}",
+                index, state.last_log_id.index
+            ))?
         }
         self.committed_index = index;
         Ok(())
     }
-    
+
     async fn purge(&mut self, index: u64) -> Result<(), Error> {
         self.logs = self.logs.split_off(&(index + 1));
         Ok(())
