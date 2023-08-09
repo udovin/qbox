@@ -5,7 +5,7 @@ use tokio::sync::oneshot;
 
 use super::{Data, Error, Node, NodeId, Response};
 
-pub enum Message<N: Node, D: Data, R: Response> {
+pub(super) enum Message<N: Node, D: Data, R: Response> {
     // Raft messages.
     AppendEntries {
         request: AppendEntriesRequest<N, D>,
@@ -29,7 +29,7 @@ pub enum Message<N: Node, D: Data, R: Response> {
         tx: oneshot::Sender<Result<(), Error>>,
     },
     // Client messages.
-    ApplyEntry {
+    WriteData {
         data: D,
         tx: oneshot::Sender<Result<R, Error>>,
     },
@@ -111,6 +111,16 @@ pub struct ConfigChangeEntry<N: Node> {
 pub struct MembershipConfig<N: Node> {
     pub members: HashMap<NodeId, N>,
     pub members_after_consensus: Option<HashMap<NodeId, N>>,
+}
+
+impl<N: Node> MembershipConfig<N> {
+    pub fn all_members(&self) -> HashMap<NodeId, N> {
+        let mut all_members = self.members.clone();
+        if let Some(members) = &self.members_after_consensus {
+            all_members.extend(members.clone());
+        }
+        all_members
+    }
 }
 
 impl<N: Node> Default for MembershipConfig<N> {

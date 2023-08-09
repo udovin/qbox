@@ -1,9 +1,11 @@
+use std::cmp::min;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio::time::sleep_until;
 
 use super::{
     AppendEntriesRequest, AppendEntriesResponse, Config, ConfigChangeEntry, Data, Entry,
@@ -59,7 +61,7 @@ where
     LS: LogStorage<N, D>,
     SM: StateMachine<N, D, R>,
 {
-    pub fn spawn(
+    pub(super) fn spawn(
         id: NodeId,
         node: N,
         config: Config,
@@ -126,8 +128,6 @@ where
             self.target_state = State::Leader;
         } else if self.membership.members.contains_key(&self.id) {
             self.target_state = State::Follower;
-            let instant = Instant::now() + self.config.new_rand_election_timeout();
-            self.next_election_timeout = Some(instant);
         } else {
             self.target_state = State::NonVoter;
         }
@@ -191,8 +191,8 @@ where
                     Message::AddNode{id, node, tx} => {
                         let _ = tx.send(self.handle_add_node(id, node).await);
                     }
-                    Message::ApplyEntry{data, tx} => {
-                        let _ = tx.send(self.handle_apply_entry(data).await);
+                    Message::WriteData{data, tx} => {
+                        let _ = tx.send(self.handle_write_data(data).await);
                     }
                 },
                 Ok(_) = &mut self.rx_shutdown => {
@@ -203,11 +203,15 @@ where
     }
 
     async fn run_candidate(&mut self) -> Result<(), Error> {
+        let now = Instant::now();
+        self.next_election_timeout = Some(now + self.config.new_rand_election_timeout());
         loop {
             if !matches!(self.target_state, State::Candidate) {
                 return Ok(());
             }
+            let election_timeout = sleep_until(self.next_election_timeout.unwrap().into());
             tokio::select! {
+                _ = election_timeout => return Ok(()),
                 Some(message) = self.rx.recv() => match message {
                     Message::AppendEntries{request, tx} => {
                         let _ = tx.send(self.handle_append_entries(request).await);
@@ -224,7 +228,7 @@ where
                     Message::AddNode{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
-                    Message::ApplyEntry{tx, ..} => {
+                    Message::WriteData{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
                 },
@@ -236,11 +240,15 @@ where
     }
 
     async fn run_follower(&mut self) -> Result<(), Error> {
+        let now = Instant::now();
+        self.next_election_timeout = Some(now + self.config.new_rand_election_timeout());
         loop {
             if !matches!(self.target_state, State::Follower) {
                 return Ok(());
             }
+            let election_timeout = sleep_until(self.next_election_timeout.unwrap().into());
             tokio::select! {
+                _ = election_timeout => self.target_state = State::Candidate,
                 Some(message) = self.rx.recv() => match message {
                     Message::AppendEntries{request, tx} => {
                         let _ = tx.send(self.handle_append_entries(request).await);
@@ -257,7 +265,7 @@ where
                     Message::AddNode{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
-                    Message::ApplyEntry{tx, ..} => {
+                    Message::WriteData{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
                 },
@@ -290,7 +298,7 @@ where
                     Message::AddNode{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
-                    Message::ApplyEntry{tx, ..} => {
+                    Message::WriteData{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
                 },
@@ -314,7 +322,6 @@ where
         let now = Instant::now();
         self.next_election_timeout = Some(now + self.config.new_rand_election_timeout());
         self.last_heartbeat = Some(now);
-        self.committed_index = request.leader_commit;
         if request.term != self.current_term {
             self.current_term = request.term;
             self.voted_for = None;
@@ -323,31 +330,56 @@ where
         if Some(request.leader_id) != self.current_leader {
             self.current_leader = Some(request.leader_id);
         }
-        if matches!(self.target_state, State::Leader)
-            || matches!(self.target_state, State::Candidate)
-        {
+        if matches!(self.target_state, State::Leader | State::Candidate) {
             self.target_state = State::Follower;
         }
-        if request.prev_log_id == self.last_log_id {
-            self.log_storage.append_entries(request.entries).await?;
-            if self.last_applied_log_id.index < self.committed_index {
-                self.log_storage
-                    .save_committed_index(self.committed_index)
-                    .await?;
-                let entries = self
-                    .log_storage
-                    .read_entries(self.last_applied_log_id.index + 1, self.committed_index + 1)
-                    .await?;
-                self.state_machine.apply_entries(entries).await?;
-            }
+        if request.prev_log_id.index > self.last_log_id.index {
             return Ok(AppendEntriesResponse {
                 term: self.current_term,
-                success: true,
+                success: false,
             });
+        }
+        if request.prev_log_id != self.last_log_id {
+            match self.log_storage
+                .read_entries(request.prev_log_id.index, request.prev_log_id.index + 1)
+                .await?
+                .first()
+            {
+                Some(prev_entry) => {
+                    if prev_entry.log_id != request.prev_log_id {
+                        return Ok(AppendEntriesResponse {
+                            term: self.current_term,
+                            success: false,
+                        });
+                    }
+                    self.log_storage.truncate(request.prev_log_id.index + 1).await?;
+                }
+                None => return Ok(AppendEntriesResponse {
+                    term: self.current_term,
+                    success: false,
+                }),
+            };
+        }
+        self.log_storage.append_entries(request.entries).await?;
+        self.last_log_id = self.log_storage.get_log_state().await?.last_log_id;
+        let leader_commit = min(request.leader_commit, self.last_log_id.index);
+        if leader_commit != self.committed_index {
+            self.log_storage
+                .save_committed_index(self.committed_index)
+                .await?;
+            self.committed_index = leader_commit;
+        }
+        if self.last_applied_log_id.index < self.committed_index {
+            let entries = self.log_storage
+                .read_entries(self.last_applied_log_id.index + 1, self.committed_index + 1)
+                .await?;
+            self.state_machine.apply_entries(entries).await?;
+            self.last_applied_log_id = self.state_machine.get_applied_log_id().await?;
+            assert!(self.last_applied_log_id.index == self.committed_index);
         }
         Ok(AppendEntriesResponse {
             term: self.current_term,
-            success: false,
+            success: true,
         })
     }
 
@@ -386,7 +418,7 @@ where
         todo!()
     }
 
-    async fn handle_apply_entry(&mut self, data: D) -> Result<R, Error> {
+    async fn handle_write_data(&mut self, data: D) -> Result<R, Error> {
         todo!()
     }
 

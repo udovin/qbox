@@ -66,13 +66,6 @@ where
         })
     }
 
-    pub async fn apply_entry(&self, data: D) -> Result<R, Error> {
-        let (tx, rx) = oneshot::channel();
-        let message = Message::ApplyEntry { data, tx };
-        self.tx.send(message)?;
-        Ok(rx.await??)
-    }
-
     pub async fn append_entries(
         &self,
         request: AppendEntriesRequest<N, D>,
@@ -113,6 +106,13 @@ where
     pub async fn add_node(&self, id: NodeId, node: N) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
         let message = Message::AddNode { id, node, tx };
+        self.tx.send(message)?;
+        Ok(rx.await??)
+    }
+
+    pub async fn write_data(&self, data: D) -> Result<R, Error> {
+        let (tx, rx) = oneshot::channel();
+        let message = Message::WriteData { data, tx };
         self.tx.send(message)?;
         Ok(rx.await??)
     }
