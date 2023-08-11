@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::qraft::{Data, Entry, Error, LogState, LogStorage, Node};
+use crate::raft::{Data, Entry, Error, LogState, LogStorage, Node};
 
 pub struct MemLogStorage<N: Node, D: Data> {
     logs: BTreeMap<u64, Entry<N, D>>,

@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
-use crate::qraft::{
+use crate::raft::{
     AppendEntriesRequest, AppendEntriesResponse, Connection, Data, Error, InstallSnapshotRequest,
     InstallSnapshotResponse, LogStorage, Node, NodeId, Raft, RequestVoteRequest,
     RequestVoteResponse, Response, StateMachine, Transport,

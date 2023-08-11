@@ -8,6 +8,7 @@ mod types;
 
 pub mod mem_storage;
 pub mod tcp_transport;
+pub mod ws_transport;
 
 pub use config::*;
 pub use message::*;

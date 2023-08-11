@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::qraft::{
+use crate::raft::{
     Data, Entry, EntryPayload, Error, HardState, LogId, MembershipConfig, Node, Response,
     StateMachine,
 };
