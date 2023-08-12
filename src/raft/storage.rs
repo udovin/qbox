@@ -21,10 +21,6 @@ pub trait LogStorage<N: Node, D: Data>: Send + Sync + 'static {
 
     async fn append_entries(&mut self, entries: Vec<Entry<N, D>>) -> Result<(), Error>;
 
-    async fn get_committed_index(&self) -> Result<u64, Error>;
-
-    async fn save_committed_index(&mut self, index: u64) -> Result<(), Error>;
-
     // Purge logs up to `index`, inclusive (`entry.index` <= `index`).
     async fn purge(&mut self, index: u64) -> Result<(), Error>;
 

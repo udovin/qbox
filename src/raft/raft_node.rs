@@ -40,7 +40,6 @@ where
     rx: mpsc::UnboundedReceiver<Message<N, D, R>>,
     rx_shutdown: oneshot::Receiver<()>,
     last_log_id: LogId,
-    committed_index: u64,
     current_term: u64,
     voted_for: Option<u64>,
     membership: MembershipConfig<N>,
@@ -81,7 +80,6 @@ where
             rx,
             rx_shutdown,
             last_log_id: LogId::default(),
-            committed_index: 0,
             current_term: 0,
             voted_for: None,
             membership: MembershipConfig::default(),
@@ -98,25 +96,13 @@ where
     async fn run(mut self) -> Result<(), Error> {
         let log_state = self.log_storage.get_log_state().await?;
         self.last_log_id = log_state.last_log_id;
-        self.committed_index = self.log_storage.get_committed_index().await?;
         let hard_state = self.state_machine.get_hard_state().await?;
         self.current_term = hard_state.current_term;
         self.voted_for = hard_state.voted_for;
         self.membership = self.state_machine.get_membership_config().await?;
         self.last_applied_log_id = self.state_machine.get_applied_log_id().await?;
-        if self.committed_index < self.last_applied_log_id.index {
-            self.committed_index = self.last_applied_log_id.index;
-        }
-        if self.last_applied_log_id.index < self.committed_index {
-            let entries = self
-                .log_storage
-                .read_entries(self.last_applied_log_id.index + 1, self.committed_index + 1)
-                .await?;
-            self.state_machine.apply_entries(entries).await?;
-            self.last_applied_log_id = self.state_machine.get_applied_log_id().await?;
-            assert!(self.last_applied_log_id.index == self.committed_index);
-        }
         if self.last_log_id.index < self.last_applied_log_id.index {
+            // Remove gap in log storage.
             self.log_storage
                 .purge(self.last_applied_log_id.index)
                 .await?;
@@ -363,19 +349,14 @@ where
         self.log_storage.append_entries(request.entries).await?;
         self.last_log_id = self.log_storage.get_log_state().await?.last_log_id;
         let leader_commit = min(request.leader_commit, self.last_log_id.index);
-        if leader_commit != self.committed_index {
-            self.log_storage
-                .save_committed_index(self.committed_index)
-                .await?;
-            self.committed_index = leader_commit;
-        }
-        if self.last_applied_log_id.index < self.committed_index {
+        if self.last_applied_log_id.index < leader_commit {
             let entries = self.log_storage
-                .read_entries(self.last_applied_log_id.index + 1, self.committed_index + 1)
+                .read_entries(self.last_applied_log_id.index + 1, leader_commit + 1)
                 .await?;
             self.state_machine.apply_entries(entries).await?;
             self.last_applied_log_id = self.state_machine.get_applied_log_id().await?;
-            assert!(self.last_applied_log_id.index == self.committed_index);
+            assert!(self.last_applied_log_id.index == leader_commit);
+            self.membership = self.state_machine.get_membership_config().await?;
         }
         Ok(AppendEntriesResponse {
             term: self.current_term,
