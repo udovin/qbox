@@ -64,8 +64,8 @@ impl<N: Node + Clone> StateMachine<N, Action, ActionResponse> for MemStateMachin
                 EntryPayload::ConfigChange(config_change) => {
                     self.membership = config_change.membership;
                 }
-                EntryPayload::Normal(normal) => {
-                    match normal.data {
+                EntryPayload::Data(data) => {
+                    match data.data {
                         Action::Set { key, value } => {
                             resp.push(ActionResponse(self.data.insert(key, value)));
                         }

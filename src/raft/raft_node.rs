@@ -3,10 +3,13 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::time::Instant;
 
+use futures_util::StreamExt;
+use futures_util::stream::FuturesOrdered;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::sleep_until;
 
+use super::raft_replication::ReplicationMessage;
 use super::{
     AppendEntriesRequest, AppendEntriesResponse, Config, ConfigChangeEntry, Data, Entry,
     EntryPayload, Error, HardState, InstallSnapshotRequest, InstallSnapshotResponse, LogId,
@@ -48,6 +51,11 @@ where
     next_election_timeout: Option<Instant>,
     last_heartbeat: Option<Instant>,
     current_leader: Option<NodeId>,
+    nodes: HashMap<NodeId, mpsc::UnboundedSender<ReplicationMessage>>,
+    awaiting_data: Vec<(u64, oneshot::Sender<Result<R, Error>>)>,
+    awaiting_config_change: Option<oneshot::Sender<Result<(), Error>>>,
+    awaiting_joint: FuturesOrdered<oneshot::Receiver<Result<R, Error>>>,
+    awaiting_uniform: FuturesOrdered<oneshot::Receiver<Result<R, Error>>>,
     _phantom: PhantomData<R>,
 }
 
@@ -88,6 +96,11 @@ where
             next_election_timeout: None,
             last_heartbeat: None,
             current_leader: None,
+            nodes: HashMap::new(),
+            awaiting_data: Vec::default(),
+            awaiting_config_change: None,
+            awaiting_joint: FuturesOrdered::default(),
+            awaiting_uniform: FuturesOrdered::default(),
             _phantom: PhantomData,
         };
         tokio::spawn(this.run())
@@ -129,14 +142,20 @@ where
     }
 
     async fn run_leader(&mut self) -> Result<(), Error> {
-        let mut nodes = HashMap::new();
+        self.nodes = HashMap::default();
+        self.awaiting_data = Vec::default();
+        self.awaiting_config_change = None;
+        self.awaiting_joint = FuturesOrdered::default();
+        self.awaiting_uniform = FuturesOrdered::default();
         let (tx_replica, mut rx_replica) = mpsc::unbounded_channel();
         for (target_id, target_node) in self.membership.all_members() {
+            if target_id == self.id {
+                continue;
+            }
             let (tx, rx) = mpsc::unbounded_channel();
             let handler = RaftReplication::spawn(self.id, target_id, target_node, tx_replica.clone(), rx);
-            nodes.insert(target_id, handler);
+            self.nodes.insert(target_id, tx);
         }
-        let mut awaiting_commit = vec!();
         self.next_election_timeout = None;
         self.last_heartbeat = None;
         self.current_leader = Some(self.id);
@@ -160,12 +179,32 @@ where
                         let _ = tx.send(Err("node already initialized".into()));
                     }
                     Message::AddNode{id, node, tx} => {
-                        let _ = tx.send(self.handle_add_node(id, node).await);
+                        self.handle_add_node(id, node, tx).await;
                     }
-                    Message::WriteData{data, tx} => {
-                        self.handle_write_data(data, tx, &mut awaiting_commit).await?;
+                    Message::WriteEntry{entry, tx} => {
+                        self.handle_write_entry(entry, tx).await;
                     }
                 },
+                Some(result) = self.awaiting_joint.next() => {
+                    match result {
+                        Ok(_) => todo!(),
+                        Err(err) => {
+                            if let Some(tx) = self.awaiting_config_change.take() {
+                                let _ = tx.send(Err(err.into()));
+                            }
+                        }
+                    }
+                }
+                Some(result) = self.awaiting_uniform.next() => {
+                    match result {
+                        Ok(_) => todo!(),
+                        Err(err) => {
+                            if let Some(tx) = self.awaiting_config_change.take() {
+                                let _ = tx.send(Err(err.into()));
+                            }
+                        }
+                    }
+                }
                 Some(event) = rx_replica.recv() => {
 
                 }
@@ -202,7 +241,7 @@ where
                     Message::AddNode{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
-                    Message::WriteData{tx, ..} => {
+                    Message::WriteEntry{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
                 },
@@ -239,7 +278,7 @@ where
                     Message::AddNode{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
-                    Message::WriteData{tx, ..} => {
+                    Message::WriteEntry{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
                 },
@@ -272,7 +311,7 @@ where
                     Message::AddNode{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
-                    Message::WriteData{tx, ..} => {
+                    Message::WriteEntry{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
                 },
@@ -383,17 +422,35 @@ where
         Ok(())
     }
 
-    async fn handle_add_node(&mut self, id: NodeId, node: N) -> Result<(), Error> {
-        todo!()
+    async fn handle_add_node(&mut self, id: NodeId, node: N, tx: oneshot::Sender<Result<(), Error>>) {
+        if self.awaiting_config_change.is_some() {
+            let _ = tx.send(Err("cluster in config change state".into()));
+            return;
+        }
+        self.awaiting_config_change = Some(tx);
+        let (awaiting_joint_tx, awaiting_joint_rx) = oneshot::channel();
+        self.awaiting_joint.push_back(awaiting_joint_rx);
+        let mut membership = self.membership.clone();
+        assert!(membership.members_after_consensus.is_none());
+        let mut members_after_consensus = membership.members.clone();
+        members_after_consensus.insert(id, node);
+        membership.members_after_consensus = Some(members_after_consensus);
+        self.handle_write_entry(EntryPayload::ConfigChange(ConfigChangeEntry { membership }), awaiting_joint_tx).await;
     }
 
-    async fn handle_write_data(
-        &mut self, 
-        data: D,
-        tx: oneshot::Sender<Result<R, Error>>,
-        callbacks: &mut Vec<(u64, oneshot::Sender<Result<R, Error>>)>,
-    ) -> Result<(), Error> {
-        todo!()
+    async fn handle_write_entry(&mut self, entry: EntryPayload<N, D>, tx: oneshot::Sender<Result<R, Error>>) {
+        let index = match self.append_entry(entry).await {
+            Ok(index) => index,
+            Err(err) => {
+                let _ = tx.send(Err(err.into()));
+                return;
+            }
+        };
+        self.awaiting_data.push((index, tx));
+        todo!();
+        // for node in self.nodes.iter() {
+        //     node.1.send(ReplicationMessage::)
+        // }
     }
 
     async fn save_hard_state(&mut self) -> Result<(), Error> {
@@ -404,7 +461,7 @@ where
         self.state_machine.save_hard_state(hs).await
     }
 
-    async fn append_entry(&mut self, payload: EntryPayload<N, D>) -> Result<(), Error> {
+    async fn append_entry(&mut self, payload: EntryPayload<N, D>) -> Result<u64, Error> {
         let log_id = LogId {
             index: self.last_log_id.index + 1,
             term: self.current_term,
@@ -412,7 +469,7 @@ where
         let entry = Entry { log_id, payload };
         self.log_storage.append_entries(vec![entry]).await?;
         self.last_log_id = log_id;
-        Ok(())
+        Ok(log_id.index)
     }
 
     async fn commit_initial_leader_entry(&mut self) -> Result<(), Error> {

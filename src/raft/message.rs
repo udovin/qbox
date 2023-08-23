@@ -29,8 +29,8 @@ pub(super) enum Message<N: Node, D: Data, R: Response> {
         tx: oneshot::Sender<Result<(), Error>>,
     },
     // Client messages.
-    WriteData {
-        data: D,
+    WriteEntry {
+        entry: EntryPayload<N, D>,
         tx: oneshot::Sender<Result<R, Error>>,
     },
 }
@@ -93,12 +93,12 @@ pub struct Entry<N: Node, D: Data> {
 #[derive(Clone, Serialize, Deserialize)]
 pub enum EntryPayload<N: Node, D: Data> {
     Blank,
-    Normal(NormalEntry<D>),
+    Data(DataEntry<D>),
     ConfigChange(ConfigChangeEntry<N>),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct NormalEntry<D: Data> {
+pub struct DataEntry<D: Data> {
     pub data: D,
 }
 

@@ -5,7 +5,7 @@ use tokio::task::JoinHandle;
 use super::{
     AppendEntriesRequest, AppendEntriesResponse, Config, Data, Error, InstallSnapshotRequest,
     InstallSnapshotResponse, LogStorage, Message, Node, NodeId, RaftNode, RequestVoteRequest,
-    RequestVoteResponse, Response, StateMachine, Transport,
+    RequestVoteResponse, Response, StateMachine, Transport, MembershipConfig, EntryPayload, DataEntry,
 };
 
 pub struct Raft<N, D, R, TR, LS, SM>
@@ -112,7 +112,10 @@ where
 
     pub async fn write_data(&self, data: D) -> Result<R, Error> {
         let (tx, rx) = oneshot::channel();
-        let message = Message::WriteData { data, tx };
+        let message = Message::WriteEntry { 
+            entry: EntryPayload::Data(DataEntry { data }), 
+            tx,
+        };
         self.tx.send(message)?;
         Ok(rx.await??)
     }
