@@ -11,10 +11,10 @@ use super::{
     AppendEntriesRequest, AppendEntriesResponse, Config, ConfigChangeEntry, Data, Entry,
     EntryPayload, Error, HardState, InstallSnapshotRequest, InstallSnapshotResponse, LogId,
     LogStorage, MembershipConfig, Message, Node, NodeId, RequestVoteRequest,
-    RequestVoteResponse, Response, StateMachine, Transport,
+    RequestVoteResponse, Response, StateMachine, Transport, RaftReplication,
 };
 
-pub enum State {
+pub(super) enum State {
     NonVoter,
     Follower,
     Candidate,
@@ -22,7 +22,7 @@ pub enum State {
     Shutdown,
 }
 
-pub struct RaftNode<N, D, R, TR, LS, SM>
+pub(super) struct RaftNode<N, D, R, TR, LS, SM>
 where
     N: Node,
     D: Data,
@@ -128,30 +128,15 @@ where
         }
     }
 
-    async fn append_entry(&mut self, payload: EntryPayload<N, D>) -> Result<(), Error> {
-        let log_id = LogId {
-            index: self.last_log_id.index + 1,
-            term: self.current_term,
-        };
-        let entry = Entry { log_id, payload };
-        self.log_storage.append_entries(vec![entry]).await?;
-        self.last_log_id = log_id;
-        Ok(())
-    }
-
-    async fn commit_initial_leader_entry(&mut self) -> Result<(), Error> {
-        let mut payload = EntryPayload::Blank;
-        if self.last_log_id.index == 0 {
-            payload = EntryPayload::ConfigChange(ConfigChangeEntry {
-                membership: self.membership.clone(),
-            });
-        }
-        self.append_entry(payload).await?;
-        println!("Appended: initial_leader_entry");
-        return Ok(());
-    }
-
     async fn run_leader(&mut self) -> Result<(), Error> {
+        let mut nodes = HashMap::new();
+        let (tx_replica, mut rx_replica) = mpsc::unbounded_channel();
+        for (target_id, target_node) in self.membership.all_members() {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let handler = RaftReplication::spawn(self.id, target_id, target_node, tx_replica.clone(), rx);
+            nodes.insert(target_id, handler);
+        }
+        let mut awaiting_commit = vec!();
         self.next_election_timeout = None;
         self.last_heartbeat = None;
         self.current_leader = Some(self.id);
@@ -178,9 +163,12 @@ where
                         let _ = tx.send(self.handle_add_node(id, node).await);
                     }
                     Message::WriteData{data, tx} => {
-                        let _ = tx.send(self.handle_write_data(data).await);
+                        self.handle_write_data(data, tx, &mut awaiting_commit).await?;
                     }
                 },
+                Some(event) = rx_replica.recv() => {
+
+                }
                 Ok(_) = &mut self.rx_shutdown => {
                     self.target_state = State::Shutdown;
                 }
@@ -399,7 +387,12 @@ where
         todo!()
     }
 
-    async fn handle_write_data(&mut self, data: D) -> Result<R, Error> {
+    async fn handle_write_data(
+        &mut self, 
+        data: D,
+        tx: oneshot::Sender<Result<R, Error>>,
+        callbacks: &mut Vec<(u64, oneshot::Sender<Result<R, Error>>)>,
+    ) -> Result<(), Error> {
         todo!()
     }
 
@@ -409,5 +402,28 @@ where
             voted_for: self.voted_for,
         };
         self.state_machine.save_hard_state(hs).await
+    }
+
+    async fn append_entry(&mut self, payload: EntryPayload<N, D>) -> Result<(), Error> {
+        let log_id = LogId {
+            index: self.last_log_id.index + 1,
+            term: self.current_term,
+        };
+        let entry = Entry { log_id, payload };
+        self.log_storage.append_entries(vec![entry]).await?;
+        self.last_log_id = log_id;
+        Ok(())
+    }
+
+    async fn commit_initial_leader_entry(&mut self) -> Result<(), Error> {
+        let mut payload = EntryPayload::Blank;
+        if self.last_log_id.index == 0 {
+            payload = EntryPayload::ConfigChange(ConfigChangeEntry {
+                membership: self.membership.clone(),
+            });
+        }
+        self.append_entry(payload).await?;
+        println!("Appended: initial_leader_entry");
+        return Ok(());
     }
 }
