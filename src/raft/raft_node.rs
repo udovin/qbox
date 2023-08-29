@@ -1,6 +1,5 @@
 use std::cmp::min;
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::time::Instant;
 
 use futures_util::StreamExt;
@@ -51,12 +50,6 @@ where
     next_election_timeout: Option<Instant>,
     last_heartbeat: Option<Instant>,
     current_leader: Option<NodeId>,
-    nodes: HashMap<NodeId, mpsc::UnboundedSender<ReplicationMessage>>,
-    awaiting_data: Vec<(u64, oneshot::Sender<Result<R, Error>>)>,
-    awaiting_config_change: Option<oneshot::Sender<Result<(), Error>>>,
-    awaiting_joint: FuturesOrdered<oneshot::Receiver<Result<R, Error>>>,
-    awaiting_uniform: FuturesOrdered<oneshot::Receiver<Result<R, Error>>>,
-    _phantom: PhantomData<R>,
 }
 
 impl<N, D, R, TR, LS, SM> RaftNode<N, D, R, TR, LS, SM>
@@ -96,12 +89,6 @@ where
             next_election_timeout: None,
             last_heartbeat: None,
             current_leader: None,
-            nodes: HashMap::new(),
-            awaiting_data: Vec::default(),
-            awaiting_config_change: None,
-            awaiting_joint: FuturesOrdered::default(),
-            awaiting_uniform: FuturesOrdered::default(),
-            _phantom: PhantomData,
         };
         tokio::spawn(this.run())
     }
@@ -132,85 +119,11 @@ where
         }
         loop {
             match &self.target_state {
-                State::Leader => self.run_leader().await?,
+                State::Leader => RaftLeader::new(&mut self).run().await?,//self.run_leader().await?,
                 State::Candidate => self.run_candidate().await?,
                 State::Follower => self.run_follower().await?,
                 State::NonVoter => self.run_non_voter().await?,
                 State::Shutdown => return Ok(()),
-            }
-        }
-    }
-
-    async fn run_leader(&mut self) -> Result<(), Error> {
-        self.nodes = HashMap::default();
-        self.awaiting_data = Vec::default();
-        self.awaiting_config_change = None;
-        self.awaiting_joint = FuturesOrdered::default();
-        self.awaiting_uniform = FuturesOrdered::default();
-        let (tx_replica, mut rx_replica) = mpsc::unbounded_channel();
-        for (target_id, target_node) in self.membership.all_members() {
-            if target_id == self.id {
-                continue;
-            }
-            let (tx, rx) = mpsc::unbounded_channel();
-            let handler = RaftReplication::spawn(self.id, target_id, target_node, tx_replica.clone(), rx);
-            self.nodes.insert(target_id, tx);
-        }
-        self.next_election_timeout = None;
-        self.last_heartbeat = None;
-        self.current_leader = Some(self.id);
-        self.commit_initial_leader_entry().await?;
-        loop {
-            if !matches!(self.target_state, State::Leader) {
-                return Ok(());
-            }
-            tokio::select! {
-                Some(message) = self.rx.recv() => match message {
-                    Message::AppendEntries{request, tx} => {
-                        let _ = tx.send(self.handle_append_entries(request).await);
-                    }
-                    Message::RequestVote{request, tx} => {
-                        let _ = tx.send(self.handle_request_vote(request).await);
-                    }
-                    Message::InstallSnapshot{request, tx} => {
-                        let _ = tx.send(self.handle_install_snapshot(request).await);
-                    }
-                    Message::InitCluster{tx, ..} => {
-                        let _ = tx.send(Err("node already initialized".into()));
-                    }
-                    Message::AddNode{id, node, tx} => {
-                        self.handle_add_node(id, node, tx).await;
-                    }
-                    Message::WriteEntry{entry, tx} => {
-                        self.handle_write_entry(entry, tx).await;
-                    }
-                },
-                Some(result) = self.awaiting_joint.next() => {
-                    match result {
-                        Ok(_) => todo!(),
-                        Err(err) => {
-                            if let Some(tx) = self.awaiting_config_change.take() {
-                                let _ = tx.send(Err(err.into()));
-                            }
-                        }
-                    }
-                }
-                Some(result) = self.awaiting_uniform.next() => {
-                    match result {
-                        Ok(_) => todo!(),
-                        Err(err) => {
-                            if let Some(tx) = self.awaiting_config_change.take() {
-                                let _ = tx.send(Err(err.into()));
-                            }
-                        }
-                    }
-                }
-                Some(event) = rx_replica.recv() => {
-
-                }
-                Ok(_) = &mut self.rx_shutdown => {
-                    self.target_state = State::Shutdown;
-                }
             }
         }
     }
@@ -422,37 +335,6 @@ where
         Ok(())
     }
 
-    async fn handle_add_node(&mut self, id: NodeId, node: N, tx: oneshot::Sender<Result<(), Error>>) {
-        if self.awaiting_config_change.is_some() {
-            let _ = tx.send(Err("cluster in config change state".into()));
-            return;
-        }
-        self.awaiting_config_change = Some(tx);
-        let (awaiting_joint_tx, awaiting_joint_rx) = oneshot::channel();
-        self.awaiting_joint.push_back(awaiting_joint_rx);
-        let mut membership = self.membership.clone();
-        assert!(membership.members_after_consensus.is_none());
-        let mut members_after_consensus = membership.members.clone();
-        members_after_consensus.insert(id, node);
-        membership.members_after_consensus = Some(members_after_consensus);
-        self.handle_write_entry(EntryPayload::ConfigChange(ConfigChangeEntry { membership }), awaiting_joint_tx).await;
-    }
-
-    async fn handle_write_entry(&mut self, entry: EntryPayload<N, D>, tx: oneshot::Sender<Result<R, Error>>) {
-        let index = match self.append_entry(entry).await {
-            Ok(index) => index,
-            Err(err) => {
-                let _ = tx.send(Err(err.into()));
-                return;
-            }
-        };
-        self.awaiting_data.push((index, tx));
-        todo!();
-        // for node in self.nodes.iter() {
-        //     node.1.send(ReplicationMessage::)
-        // }
-    }
-
     async fn save_hard_state(&mut self) -> Result<(), Error> {
         let hs = HardState {
             current_term: self.current_term,
@@ -482,5 +364,143 @@ where
         self.append_entry(payload).await?;
         println!("Appended: initial_leader_entry");
         return Ok(());
+    }
+}
+
+struct RaftLeader<'a, N, D, R, TR, LS, SM>
+where
+    N: Node,
+    D: Data,
+    R: Response,
+    TR: Transport<N, D>,
+    LS: LogStorage<N, D>,
+    SM: StateMachine<N, D, R>
+{
+    node: &'a mut RaftNode<N, D, R, TR, LS, SM>,
+    nodes: HashMap<NodeId, mpsc::UnboundedSender<ReplicationMessage>>,
+    awaiting_data: Vec<(u64, oneshot::Sender<Result<R, Error>>)>,
+    awaiting_config_change: Option<oneshot::Sender<Result<(), Error>>>,
+    awaiting_joint: FuturesOrdered<oneshot::Receiver<Result<R, Error>>>,
+    awaiting_uniform: FuturesOrdered<oneshot::Receiver<Result<R, Error>>>,
+}
+
+impl<'a, N, D, R, TR, LS, SM> RaftLeader<'a, N, D, R, TR, LS, SM>
+where
+    N: Node,
+    D: Data,
+    R: Response,
+    TR: Transport<N, D>,
+    LS: LogStorage<N, D>,
+    SM: StateMachine<N, D, R>
+{
+    pub(super) fn new(node: &'a mut RaftNode<N, D, R, TR, LS, SM>) -> Self {
+        Self {
+            node,
+            nodes: HashMap::new(),
+            awaiting_data: Vec::default(),
+            awaiting_config_change: None,
+            awaiting_joint: FuturesOrdered::default(),
+            awaiting_uniform: FuturesOrdered::default(),
+        }
+    }
+
+    pub(super) async fn run(mut self) -> Result<(), Error> {
+        let (tx_replica, mut rx_replica) = mpsc::unbounded_channel();
+        for (target_id, target_node) in self.node.membership.all_members() {
+            if target_id == self.node.id {
+                continue;
+            }
+            let (tx, rx) = mpsc::unbounded_channel();
+            let handler = RaftReplication::spawn(self.node.id, target_id, target_node, tx_replica.clone(), rx);
+            self.nodes.insert(target_id, tx);
+        }
+        self.node.next_election_timeout = None;
+        self.node.last_heartbeat = None;
+        self.node.current_leader = Some(self.node.id);
+        self.node.commit_initial_leader_entry().await?;
+        loop {
+            if !matches!(self.node.target_state, State::Leader) {
+                return Ok(());
+            }
+            tokio::select! {
+                Some(message) = self.node.rx.recv() => match message {
+                    Message::AppendEntries{request, tx} => {
+                        let _ = tx.send(self.node.handle_append_entries(request).await);
+                    }
+                    Message::RequestVote{request, tx} => {
+                        let _ = tx.send(self.node.handle_request_vote(request).await);
+                    }
+                    Message::InstallSnapshot{request, tx} => {
+                        let _ = tx.send(self.node.handle_install_snapshot(request).await);
+                    }
+                    Message::InitCluster{tx, ..} => {
+                        let _ = tx.send(Err("node already initialized".into()));
+                    }
+                    Message::AddNode{id, node, tx} => {
+                        self.handle_add_node(id, node, tx).await;
+                    }
+                    Message::WriteEntry{entry, tx} => {
+                        self.handle_write_entry(entry, tx).await;
+                    }
+                },
+                Some(result) = self.awaiting_joint.next() => {
+                    match result {
+                        Ok(_) => todo!(),
+                        Err(err) => {
+                            if let Some(tx) = self.awaiting_config_change.take() {
+                                let _ = tx.send(Err(err.into()));
+                            }
+                        }
+                    }
+                }
+                Some(result) = self.awaiting_uniform.next() => {
+                    match result {
+                        Ok(_) => todo!(),
+                        Err(err) => {
+                            if let Some(tx) = self.awaiting_config_change.take() {
+                                let _ = tx.send(Err(err.into()));
+                            }
+                        }
+                    }
+                }
+                Some(event) = rx_replica.recv() => {
+
+                }
+                Ok(_) = &mut self.node.rx_shutdown => {
+                    self.node.target_state = State::Shutdown;
+                }
+            }
+        }
+    }
+
+    async fn handle_add_node(&mut self, id: NodeId, node: N, tx: oneshot::Sender<Result<(), Error>>) {
+        if self.awaiting_config_change.is_some() {
+            let _ = tx.send(Err("cluster in config change state".into()));
+            return;
+        }
+        self.awaiting_config_change = Some(tx);
+        let (awaiting_joint_tx, awaiting_joint_rx) = oneshot::channel();
+        self.awaiting_joint.push_back(awaiting_joint_rx);
+        let mut membership = self.node.membership.clone();
+        assert!(membership.members_after_consensus.is_none());
+        let mut members_after_consensus = membership.members.clone();
+        members_after_consensus.insert(id, node);
+        membership.members_after_consensus = Some(members_after_consensus);
+        self.handle_write_entry(EntryPayload::ConfigChange(ConfigChangeEntry { membership }), awaiting_joint_tx).await;
+    }
+
+    async fn handle_write_entry(&mut self, entry: EntryPayload<N, D>, tx: oneshot::Sender<Result<R, Error>>) {
+        let index = match self.node.append_entry(entry).await {
+            Ok(index) => index,
+            Err(err) => {
+                let _ = tx.send(Err(err.into()));
+                return;
+            }
+        };
+        self.awaiting_data.push((index, tx));
+        todo!();
+        // for node in self.nodes.iter() {
+        //     node.1.send(ReplicationMessage::)
+        // }
     }
 }
