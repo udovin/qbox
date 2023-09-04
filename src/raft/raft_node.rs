@@ -353,18 +353,11 @@ where
         self.last_log_id = log_id;
         Ok(log_id.index)
     }
+}
 
-    async fn commit_initial_leader_entry(&mut self) -> Result<(), Error> {
-        let mut payload = EntryPayload::Blank;
-        if self.last_log_id.index == 0 {
-            payload = EntryPayload::ConfigChange(ConfigChangeEntry {
-                membership: self.membership.clone(),
-            });
-        }
-        self.append_entry(payload).await?;
-        println!("Appended: initial_leader_entry");
-        return Ok(());
-    }
+struct ReplicationNode {
+    tx: mpsc::UnboundedSender<ReplicationMessage>,
+    handle: JoinHandle<Result<(), Error>>,
 }
 
 struct RaftLeader<'a, N, D, R, TR, LS, SM>
@@ -377,11 +370,12 @@ where
     SM: StateMachine<N, D, R>
 {
     node: &'a mut RaftNode<N, D, R, TR, LS, SM>,
-    nodes: HashMap<NodeId, mpsc::UnboundedSender<ReplicationMessage>>,
+    nodes: HashMap<NodeId, ReplicationNode>,
     awaiting_data: Vec<(u64, oneshot::Sender<Result<R, Error>>)>,
     awaiting_config_change: Option<oneshot::Sender<Result<(), Error>>>,
     awaiting_joint: FuturesOrdered<oneshot::Receiver<Result<R, Error>>>,
     awaiting_uniform: FuturesOrdered<oneshot::Receiver<Result<R, Error>>>,
+    commit_index: u64,
 }
 
 impl<'a, N, D, R, TR, LS, SM> RaftLeader<'a, N, D, R, TR, LS, SM>
@@ -401,23 +395,33 @@ where
             awaiting_config_change: None,
             awaiting_joint: FuturesOrdered::default(),
             awaiting_uniform: FuturesOrdered::default(),
+            commit_index: 0,
         }
     }
 
     pub(super) async fn run(mut self) -> Result<(), Error> {
+        self.node.next_election_timeout = None;
+        self.node.last_heartbeat = None;
+        self.node.current_leader = Some(self.node.id);
+        self.commit_initial_leader_entry().await?;
         let (tx_replica, mut rx_replica) = mpsc::unbounded_channel();
         for (target_id, target_node) in self.node.membership.all_members() {
             if target_id == self.node.id {
                 continue;
             }
             let (tx, rx) = mpsc::unbounded_channel();
-            let handler = RaftReplication::spawn(self.node.id, target_id, target_node, tx_replica.clone(), rx);
-            self.nodes.insert(target_id, tx);
+            let handle = RaftReplication::spawn(
+                self.node.id,
+                target_id,
+                target_node,
+                tx_replica.clone(),
+                rx,
+                self.node.current_term,
+                self.node.last_log_id.index,
+                self.commit_index,
+            );
+            self.nodes.insert(target_id, ReplicationNode { tx, handle });
         }
-        self.node.next_election_timeout = None;
-        self.node.last_heartbeat = None;
-        self.node.current_leader = Some(self.node.id);
-        self.node.commit_initial_leader_entry().await?;
         loop {
             if !matches!(self.node.target_state, State::Leader) {
                 return Ok(());
@@ -498,9 +502,22 @@ where
             }
         };
         self.awaiting_data.push((index, tx));
-        todo!();
-        // for node in self.nodes.iter() {
-        //     node.1.send(ReplicationMessage::)
-        // }
+        for node in self.nodes.values() {
+            let _ = node.tx.send(ReplicationMessage::Replicate {
+                last_log_index: index,
+                commit_index: self.commit_index,
+            });
+        }
+    }
+
+    async fn commit_initial_leader_entry(&mut self) -> Result<(), Error> {
+        let mut payload = EntryPayload::Blank;
+        if self.node.last_log_id.index == 0 {
+            payload = EntryPayload::ConfigChange(ConfigChangeEntry {
+                membership: self.node.membership.clone(),
+            });
+        }
+        self.node.append_entry(payload).await?;
+        Ok(())
     }
 }

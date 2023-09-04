@@ -19,9 +19,8 @@ where
 {
     tx: mpsc::UnboundedSender<Message<N, D, R>>,
     tx_shutdown: Mutex<Option<oneshot::Sender<()>>>,
-    node_handle: Mutex<Option<JoinHandle<Result<(), Error>>>>,
+    handle: Mutex<Option<JoinHandle<Result<(), Error>>>>,
     _phantom: (
-        PhantomData<R>,
         PhantomData<TR>,
         PhantomData<LS>,
         PhantomData<SM>,
@@ -48,7 +47,7 @@ where
         config.validate()?;
         let (tx, rx) = mpsc::unbounded_channel();
         let (tx_shutdown, rx_shutdown) = oneshot::channel();
-        let node_handle = RaftNode::<N, D, R, TR, LS, SM>::spawn(
+        let handle = RaftNode::<N, D, R, TR, LS, SM>::spawn(
             id,
             node,
             config,
@@ -61,8 +60,12 @@ where
         Ok(Self {
             tx,
             tx_shutdown: Mutex::new(Some(tx_shutdown)),
-            node_handle: Mutex::new(Some(node_handle)),
-            _phantom: (PhantomData, PhantomData, PhantomData, PhantomData),
+            handle: Mutex::new(Some(handle)),
+            _phantom: (
+                PhantomData,
+                PhantomData,
+                PhantomData,
+            ),
         })
     }
 
@@ -121,7 +124,7 @@ where
     }
 
     pub async fn join(&self) -> Result<(), Error> {
-        if let Some(handle) = self.node_handle.lock().await.take() {
+        if let Some(handle) = self.handle.lock().await.take() {
             handle.await??;
         }
         Ok(())
@@ -131,7 +134,7 @@ where
         if let Some(tx) = self.tx_shutdown.lock().await.take() {
             let _ = tx.send(());
         }
-        if let Some(handle) = self.node_handle.lock().await.take() {
+        if let Some(handle) = self.handle.lock().await.take() {
             handle.await??;
         }
         Ok(())

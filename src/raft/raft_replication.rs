@@ -1,9 +1,13 @@
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::{NodeId, Node, Error};
+use super::{NodeId, Node, Error, LogId};
 
 pub(super) enum ReplicationMessage {
+    Replicate {
+        last_log_index: u64,
+        commit_index: u64,
+    },
     Terminate,
 }
 
@@ -22,6 +26,9 @@ pub(super) struct RaftReplication<N: Node> {
     tx: mpsc::UnboundedSender<ReplicationEvent>,
     rx: mpsc::UnboundedReceiver<ReplicationMessage>,
     target_state: ReplicationState,
+    current_term: u64,
+    last_log_index: u64,
+    commit_index: u64,
 }
 
 impl<N: Node> RaftReplication<N> {
@@ -31,6 +38,9 @@ impl<N: Node> RaftReplication<N> {
         target_node: N,
         tx: mpsc::UnboundedSender<ReplicationEvent>,
         rx: mpsc::UnboundedReceiver<ReplicationMessage>,
+        current_term: u64,
+        last_log_index: u64,
+        commit_index: u64,
     ) -> JoinHandle<Result<(), Error>> {
         let this = Self {
             leader_id,
@@ -39,6 +49,9 @@ impl<N: Node> RaftReplication<N> {
             tx,
             rx,
             target_state: ReplicationState::Normal,
+            current_term,
+            last_log_index,
+            commit_index,
         };
         tokio::spawn(this.run())
     }
@@ -60,6 +73,10 @@ impl<N: Node> RaftReplication<N> {
             }
             tokio::select! {
                 Some(message) = self.rx.recv() => match message {
+                    ReplicationMessage::Replicate { last_log_index, commit_index } => {
+                        self.last_log_index = last_log_index;
+                        self.commit_index = commit_index;
+                    }
                     ReplicationMessage::Terminate => {
                         self.target_state = ReplicationState::Shutdown;
                     }
@@ -75,6 +92,10 @@ impl<N: Node> RaftReplication<N> {
             }
             tokio::select! {
                 Some(message) = self.rx.recv() => match message {
+                    ReplicationMessage::Replicate { last_log_index, commit_index } => {
+                        self.last_log_index = last_log_index;
+                        self.commit_index = commit_index;
+                    }
                     ReplicationMessage::Terminate => {
                         self.target_state = ReplicationState::Shutdown;
                     }
