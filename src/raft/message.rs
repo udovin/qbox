@@ -1,14 +1,14 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use super::{Data, Error, Node, NodeId, Response};
+use super::{Data, Error, NodeId, Response};
 
-pub(super) enum Message<N: Node, D: Data, R: Response> {
+pub(super) enum Message<D: Data, R: Response> {
     // Raft messages.
     AppendEntries {
-        request: AppendEntriesRequest<N, D>,
+        request: AppendEntriesRequest<D>,
         tx: oneshot::Sender<Result<AppendEntriesResponse, Error>>,
     },
     RequestVote {
@@ -25,22 +25,21 @@ pub(super) enum Message<N: Node, D: Data, R: Response> {
     },
     AddNode {
         id: NodeId,
-        node: N,
         tx: oneshot::Sender<Result<(), Error>>,
     },
     // Client messages.
     WriteEntry {
-        entry: EntryPayload<N, D>,
+        entry: EntryPayload<D>,
         tx: oneshot::Sender<Result<R, Error>>,
     },
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct AppendEntriesRequest<N: Node, D: Data> {
+pub struct AppendEntriesRequest<D: Data> {
     pub term: u64,
     pub leader_id: NodeId,
     pub prev_log_id: LogId,
-    pub entries: Vec<Entry<N, D>>,
+    pub entries: Vec<Entry<D>>,
     pub leader_commit: u64,
 }
 
@@ -85,16 +84,16 @@ pub struct LogId {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Entry<N: Node, D: Data> {
+pub struct Entry<D: Data> {
     pub log_id: LogId,
-    pub payload: EntryPayload<N, D>,
+    pub payload: EntryPayload<D>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub enum EntryPayload<N: Node, D: Data> {
+pub enum EntryPayload<D: Data> {
     Blank,
     Data(DataEntry<D>),
-    ConfigChange(ConfigChangeEntry<N>),
+    ConfigChange(ConfigChangeEntry),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -103,18 +102,18 @@ pub struct DataEntry<D: Data> {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct ConfigChangeEntry<N: Node> {
-    pub membership: MembershipConfig<N>,
+pub struct ConfigChangeEntry {
+    pub membership: MembershipConfig,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct MembershipConfig<N: Node> {
-    pub members: HashMap<NodeId, N>,
-    pub members_after_consensus: Option<HashMap<NodeId, N>>,
+pub struct MembershipConfig {
+    pub members: HashSet<NodeId>,
+    pub members_after_consensus: Option<HashSet<NodeId>>,
 }
 
-impl<N: Node> MembershipConfig<N> {
-    pub fn all_members(&self) -> HashMap<NodeId, N> {
+impl MembershipConfig {
+    pub fn all_members(&self) -> HashSet<NodeId> {
         let mut all_members = self.members.clone();
         if let Some(members) = &self.members_after_consensus {
             all_members.extend(members.clone());
@@ -123,10 +122,10 @@ impl<N: Node> MembershipConfig<N> {
     }
 }
 
-impl<N: Node> Default for MembershipConfig<N> {
+impl Default for MembershipConfig {
     fn default() -> Self {
         Self {
-            members: HashMap::new(),
+            members: HashSet::new(),
             members_after_consensus: None,
         }
     }

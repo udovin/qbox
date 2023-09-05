@@ -1,9 +1,9 @@
 use clap::{Args, Parser, Subcommand};
 use qbox::raft::mem_storage::{Action, ActionResponse, MemLogStorage, MemStateMachine};
-use qbox::raft::ws_transport::{handle_connection, WsTransport};
+use qbox::raft::ws_transport::{handle_connection, WsTransport, NodeMetaStorage};
 use qbox::raft::{
     Config, Data, Entry, Error, HardState, LogId,
-    LogStorage, MembershipConfig, Node, Raft, Response, StateMachine,
+    LogStorage, MembershipConfig, Raft, Response, StateMachine,
     Transport, NodeId,
 };
 use rand::{thread_rng, Rng};
@@ -66,21 +66,21 @@ fn get_node_id(dir: &Path) -> Result<u64, std::io::Error> {
     }
 }
 
-struct SmWrap<N: Node>(Arc<RwLock<MemStateMachine<N>>>);
+struct SmWrap(Arc<RwLock<MemStateMachine>>);
 
 #[async_trait::async_trait]
-impl<N: Node> StateMachine<N, Action, ActionResponse> for SmWrap<N> {
+impl StateMachine<Action, ActionResponse> for SmWrap {
     async fn get_applied_log_id(&self) -> Result<LogId, Error> {
         self.0.read().await.get_applied_log_id().await
     }
 
-    async fn get_membership_config(&self) -> Result<MembershipConfig<N>, Error> {
+    async fn get_membership_config(&self) -> Result<MembershipConfig, Error> {
         self.0.read().await.get_membership_config().await
     }
 
     async fn apply_entries(
         &mut self,
-        entires: Vec<Entry<N, Action>>,
+        entires: Vec<Entry<Action>>,
     ) -> Result<Vec<ActionResponse>, Error> {
         self.0.write().await.apply_entries(entires).await
     }
@@ -94,17 +94,26 @@ impl<N: Node> StateMachine<N, Action, ActionResponse> for SmWrap<N> {
     }
 }
 
-async fn raft_handle<N, D, R, TR, LS, SM>(
+#[async_trait::async_trait]
+impl NodeMetaStorage<SocketAddr> for SmWrap {
+    async fn get_node_meta(&self, id: NodeId) -> Result<SocketAddr, Error> {
+        match self.0.read().await.get(&format!("nodes/{}", id)) {
+            Some(addr) => Ok(addr.parse()?),
+            None => Err("node not found".into()),
+        }
+    }
+}
+
+async fn raft_handle<D, R, TR, LS, SM>(
     ws: warp::ws::Ws,
-    raft: Arc<Raft<N, D, R, TR, LS, SM>>,
+    raft: Arc<Raft<D, R, TR, LS, SM>>,
 ) -> Result<impl warp::Reply, Infallible>
 where
-    N: Node + DeserializeOwned,
     D: Data + DeserializeOwned,
     R: Response + Serialize,
-    TR: Transport<N, D>,
-    LS: LogStorage<N, D>,
-    SM: StateMachine<N, D, R>,
+    TR: Transport<D>,
+    LS: LogStorage<D>,
+    SM: StateMachine<D, R>,
 {
     Ok(ws.on_upgrade(|socket| async {
         handle_connection(socket, raft).await.unwrap();
@@ -112,36 +121,38 @@ where
 }
 
 #[derive(Serialize, Deserialize)]
-struct AddNodeMessage<N: Node> {
+struct AddNodeMessage {
     id: NodeId,
-    node: N,
+    node: SocketAddr,
 }
 
-async fn raft_add_node_handle<N, D, R, TR, LS, SM>(
-    body: AddNodeMessage<N>,
-    raft: Arc<Raft<N, D, R, TR, LS, SM>>,
+async fn raft_add_node_handle<R, TR, LS, SM>(
+    body: AddNodeMessage,
+    raft: Arc<Raft<Action, R, TR, LS, SM>>,
 ) -> Result<impl warp::Reply, Infallible>
 where
-    N: Node + DeserializeOwned,
-    D: Data + DeserializeOwned,
     R: Response + Serialize,
-    TR: Transport<N, D>,
-    LS: LogStorage<N, D>,
-    SM: StateMachine<N, D, R>,
+    TR: Transport<Action>,
+    LS: LogStorage<Action>,
+    SM: StateMachine<Action, R>,
 {
-    raft.add_node(body.id, body.node).await.unwrap();
+    let node = Action::Set {
+        key: format!("nodes/{}", body.id),
+        value: body.node.to_string(),
+    };
+    raft.write_data(node).await.unwrap();
+    raft.add_node(body.id).await.unwrap();
     Ok(warp::reply::with_status("", warp::http::StatusCode::OK))
 }
 
 async fn async_server_main(args: ServerArgs) {
     let config = Config::default();
-    let transport = WsTransport::new();
     let log_storage = MemLogStorage::new();
     let state_machine = Arc::new(RwLock::new(MemStateMachine::new()));
+    let transport = WsTransport::new(SmWrap(state_machine.clone()));
     let node_id = get_node_id(args.data_dir.as_path()).unwrap();
     let raft = Raft::new(
         node_id,
-        args.addr,
         config,
         transport,
         log_storage,
@@ -178,6 +189,13 @@ async fn async_server_main(args: ServerArgs) {
     } else if args.init {
         println!("Initializing cluster");
         raft.init_cluster().await.unwrap();
+        let node = Action::Set {
+            key: format!("nodes/{}", node_id),
+            value: args.addr.to_string(),
+        };
+        println!("Writing node meta");
+        raft.write_data(node).await.unwrap();
+        println!("Initialization completed!");
     }
     tokio::select! {
         _ = server => {}

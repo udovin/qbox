@@ -4,20 +4,19 @@ use tokio::task::JoinHandle;
 
 use super::{
     AppendEntriesRequest, AppendEntriesResponse, Config, Data, Error, InstallSnapshotRequest,
-    InstallSnapshotResponse, LogStorage, Message, Node, NodeId, RaftNode, RequestVoteRequest,
-    RequestVoteResponse, Response, StateMachine, Transport, MembershipConfig, EntryPayload, DataEntry,
+    InstallSnapshotResponse, LogStorage, Message, NodeId, RaftNode, RequestVoteRequest,
+    RequestVoteResponse, Response, StateMachine, Transport, EntryPayload, DataEntry,
 };
 
-pub struct Raft<N, D, R, TR, LS, SM>
+pub struct Raft<D, R, TR, LS, SM>
 where
-    N: Node,
     D: Data,
     R: Response,
-    TR: Transport<N, D>,
-    LS: LogStorage<N, D>,
-    SM: StateMachine<N, D, R>,
+    TR: Transport<D>,
+    LS: LogStorage<D>,
+    SM: StateMachine<D, R>,
 {
-    tx: mpsc::UnboundedSender<Message<N, D, R>>,
+    tx: mpsc::UnboundedSender<Message<D, R>>,
     tx_shutdown: Mutex<Option<oneshot::Sender<()>>>,
     handle: Mutex<Option<JoinHandle<Result<(), Error>>>>,
     _phantom: (
@@ -27,18 +26,16 @@ where
     ),
 }
 
-impl<N, D, R, TR, LS, SM> Raft<N, D, R, TR, LS, SM>
+impl<D, R, TR, LS, SM> Raft<D, R, TR, LS, SM>
 where
-    N: Node,
     D: Data,
     R: Response,
-    TR: Transport<N, D>,
-    LS: LogStorage<N, D>,
-    SM: StateMachine<N, D, R>,
+    TR: Transport<D>,
+    LS: LogStorage<D>,
+    SM: StateMachine<D, R>,
 {
     pub fn new(
         id: NodeId,
-        node: N,
         config: Config,
         transport: TR,
         log_storage: LS,
@@ -47,9 +44,8 @@ where
         config.validate()?;
         let (tx, rx) = mpsc::unbounded_channel();
         let (tx_shutdown, rx_shutdown) = oneshot::channel();
-        let handle = RaftNode::<N, D, R, TR, LS, SM>::spawn(
+        let handle = RaftNode::<D, R, TR, LS, SM>::spawn(
             id,
-            node,
             config,
             transport,
             log_storage,
@@ -71,7 +67,7 @@ where
 
     pub async fn append_entries(
         &self,
-        request: AppendEntriesRequest<N, D>,
+        request: AppendEntriesRequest<D>,
     ) -> Result<AppendEntriesResponse, Error> {
         let (tx, rx) = oneshot::channel();
         let message = Message::AppendEntries { request, tx };
@@ -106,9 +102,9 @@ where
         Ok(rx.await??)
     }
 
-    pub async fn add_node(&self, id: NodeId, node: N) -> Result<(), Error> {
+    pub async fn add_node(&self, id: NodeId) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
-        let message = Message::AddNode { id, node, tx };
+        let message = Message::AddNode { id, tx };
         self.tx.send(message)?;
         Ok(rx.await??)
     }

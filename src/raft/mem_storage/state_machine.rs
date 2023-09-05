@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::raft::{
-    Data, Entry, EntryPayload, Error, HardState, LogId, MembershipConfig, Node, Response,
+    Data, Entry, EntryPayload, Error, HardState, LogId, MembershipConfig, Response,
     StateMachine,
 };
 
@@ -20,14 +20,14 @@ pub struct ActionResponse(Option<String>);
 
 impl Response for ActionResponse {}
 
-pub struct MemStateMachine<N: Node> {
+pub struct MemStateMachine {
     data: HashMap<String, String>,
     hard_state: HardState,
-    membership: MembershipConfig<N>,
+    membership: MembershipConfig,
     applied_log_id: LogId,
 }
 
-impl<N: Node> MemStateMachine<N> {
+impl MemStateMachine {
     pub fn new() -> Self {
         Self {
             data: HashMap::new(),
@@ -43,18 +43,18 @@ impl<N: Node> MemStateMachine<N> {
 }
 
 #[async_trait::async_trait]
-impl<N: Node + Clone> StateMachine<N, Action, ActionResponse> for MemStateMachine<N> {
+impl StateMachine<Action, ActionResponse> for MemStateMachine {
     async fn get_applied_log_id(&self) -> Result<LogId, Error> {
         Ok(self.applied_log_id)
     }
 
-    async fn get_membership_config(&self) -> Result<MembershipConfig<N>, Error> {
+    async fn get_membership_config(&self) -> Result<MembershipConfig, Error> {
         Ok(self.membership.clone())
     }
 
     async fn apply_entries(
         &mut self,
-        entires: Vec<Entry<N, Action>>,
+        entires: Vec<Entry<Action>>,
     ) -> Result<Vec<ActionResponse>, Error> {
         let mut resp = Vec::new();
         for entry in entires.into_iter() {

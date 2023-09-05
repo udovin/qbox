@@ -1,13 +1,13 @@
 use super::{
     AppendEntriesRequest, AppendEntriesResponse, Data, Error, InstallSnapshotRequest,
-    InstallSnapshotResponse, Node, NodeId, RequestVoteRequest, RequestVoteResponse,
+    InstallSnapshotResponse, NodeId, RequestVoteRequest, RequestVoteResponse,
 };
 
 #[async_trait::async_trait]
-pub trait Connection<N: Node, D: Data> {
+pub trait Connection<D: Data> {
     async fn append_entries(
         &mut self,
-        request: AppendEntriesRequest<N, D>,
+        request: AppendEntriesRequest<D>,
     ) -> Result<AppendEntriesResponse, Error>;
 
     async fn install_snapshot(
@@ -22,8 +22,8 @@ pub trait Connection<N: Node, D: Data> {
 }
 
 #[async_trait::async_trait]
-pub trait Transport<N: Node, D: Data>: Send + Sync + 'static {
-    type Connection: Connection<N, D>;
+pub trait Transport<D: Data>: Send + Sync + 'static {
+    type Connection: Connection<D>;
 
-    async fn connect(&self, id: NodeId, node: &N) -> Result<Self::Connection, Error>;
+    async fn connect(&self, id: NodeId) -> Result<Self::Connection, Error>;
 }

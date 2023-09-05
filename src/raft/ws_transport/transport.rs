@@ -9,11 +9,16 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, WebSocketStream, MaybeTlsStream};
 
-use crate::raft::{Raft, LogStorage, StateMachine, Node, Data, AppendEntriesRequest, InstallSnapshotRequest, RequestVoteRequest, Transport, NodeId, Error, Connection, AppendEntriesResponse, InstallSnapshotResponse, RequestVoteResponse, Response};
+use crate::raft::{Raft, LogStorage, StateMachine, Data, AppendEntriesRequest, InstallSnapshotRequest, RequestVoteRequest, Transport, NodeId, Error, Connection, AppendEntriesResponse, InstallSnapshotResponse, RequestVoteResponse, Response};
+
+#[async_trait::async_trait]
+pub trait NodeMetaStorage<D>: Send + Sync + 'static {
+    async fn get_node_meta(&self, id: NodeId) -> Result<D, Error>;
+}
 
 #[derive(Serialize, Deserialize)]
-enum WsMessage<N: Node, D: Data> {
-    AppendEntries(AppendEntriesRequest<N, D>),
+enum WsMessage<D: Data> {
+    AppendEntries(AppendEntriesRequest<D>),
     InstallSnapshot(InstallSnapshotRequest),
     RequestVote(RequestVoteRequest),
 }
@@ -30,10 +35,10 @@ pub struct WsConnection<D: Data> {
 }
 
 #[async_trait::async_trait]
-impl<D: Data + Serialize> Connection<SocketAddr, D> for WsConnection<D> {
+impl<D: Data + Serialize> Connection<D> for WsConnection<D> {
     async fn append_entries(
         &mut self,
-        request: AppendEntriesRequest<SocketAddr, D>,
+        request: AppendEntriesRequest<D>,
     ) -> Result<AppendEntriesResponse, Error> {
         let message = WsMessage::AppendEntries(request);
         self.tx.send(Message::binary(bincode::serialize(&message)?)).await?;
@@ -52,7 +57,7 @@ impl<D: Data + Serialize> Connection<SocketAddr, D> for WsConnection<D> {
         &mut self,
         request: InstallSnapshotRequest,
     ) -> Result<InstallSnapshotResponse, Error> {
-        let message = WsMessage::<SocketAddr, D>::InstallSnapshot(request);
+        let message = WsMessage::<D>::InstallSnapshot(request);
         self.tx.send(Message::binary(bincode::serialize(&message)?)).await?;
         match self.rx.next().await {
             Some(Ok(data)) => {
@@ -69,7 +74,7 @@ impl<D: Data + Serialize> Connection<SocketAddr, D> for WsConnection<D> {
         &mut self,
         request: RequestVoteRequest,
     ) -> Result<RequestVoteResponse, Error> {
-        let message = WsMessage::<SocketAddr, D>::RequestVote(request);
+        let message = WsMessage::<D>::RequestVote(request);
         self.tx.send(Message::binary(bincode::serialize(&message)?)).await?;
         match self.rx.next().await {
             Some(Ok(data)) => {
@@ -83,19 +88,26 @@ impl<D: Data + Serialize> Connection<SocketAddr, D> for WsConnection<D> {
     }
 }
 
-pub struct WsTransport {}
+pub struct WsTransport<NM: NodeMetaStorage<SocketAddr>> {
+    storage: NM,
+}
 
-impl WsTransport {
-    pub fn new() -> Self {
-        Self { }
+impl<NM: NodeMetaStorage<SocketAddr>> WsTransport<NM> {
+    pub fn new(storage: NM) -> Self {
+        Self { storage }
     }
 }
 
 #[async_trait::async_trait]
-impl<D: Data + Serialize> Transport<SocketAddr, D> for WsTransport {
+impl<D, NM> Transport<D> for WsTransport<NM>
+where
+    D: Data + Serialize,
+    NM: NodeMetaStorage<SocketAddr>,
+{
     type Connection = WsConnection<D>;
 
-    async fn connect(&self, _id: NodeId, node: &SocketAddr) -> Result<WsConnection<D>, Error> {
+    async fn connect(&self, id: NodeId) -> Result<WsConnection<D>, Error> {
+        let node = self.storage.get_node_meta(id).await?;
         let response = connect_async(format!("http://{}/raft", node)).await?;
         let stream = response.0;
         let (tx, rx) = stream.split();
@@ -107,23 +119,22 @@ impl<D: Data + Serialize> Transport<SocketAddr, D> for WsTransport {
     }
 }
 
-pub async fn handle_connection<N, D, R, TR, LS, SM>(
+pub async fn handle_connection<D, R, TR, LS, SM>(
     ws: warp::ws::WebSocket,
-    raft: Arc<Raft<N, D, R, TR, LS, SM>>,
+    raft: Arc<Raft<D, R, TR, LS, SM>>,
 ) -> Result<(), Error>
 where
-    N: Node + DeserializeOwned,
     D: Data + DeserializeOwned,
     R: Response + Serialize,
-    TR: Transport<N, D>,
-    LS: LogStorage<N, D>,
-    SM: StateMachine<N, D, R>,
+    TR: Transport<D>,
+    LS: LogStorage<D>,
+    SM: StateMachine<D, R>,
 {
     let (mut tx, mut rx) = ws.split();
     let map_err = |err: Error| WsError::Message(err.to_string());
     while let Some(request) = rx.next().await {
         match request {
-            Ok(data) => match bincode::deserialize::<WsMessage<N, D>>(data.as_bytes())? {
+            Ok(data) => match bincode::deserialize::<WsMessage<D>>(data.as_bytes())? {
                 WsMessage::AppendEntries(request) => {
                     let response =
                         bincode::serialize(&raft.append_entries(request).await.map_err(map_err))?;

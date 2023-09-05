@@ -1,5 +1,6 @@
 use std::cmp::min;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 use futures_util::StreamExt;
@@ -12,7 +13,7 @@ use super::raft_replication::ReplicationMessage;
 use super::{
     AppendEntriesRequest, AppendEntriesResponse, Config, ConfigChangeEntry, Data, Entry,
     EntryPayload, Error, HardState, InstallSnapshotRequest, InstallSnapshotResponse, LogId,
-    LogStorage, MembershipConfig, Message, Node, NodeId, RequestVoteRequest,
+    LogStorage, MembershipConfig, Message, NodeId, RequestVoteRequest,
     RequestVoteResponse, Response, StateMachine, Transport, RaftReplication,
 };
 
@@ -24,27 +25,25 @@ pub(super) enum State {
     Shutdown,
 }
 
-pub(super) struct RaftNode<N, D, R, TR, LS, SM>
+pub(super) struct RaftNode<D, R, TR, LS, SM>
 where
-    N: Node,
     D: Data,
     R: Response,
-    TR: Transport<N, D>,
-    LS: LogStorage<N, D>,
-    SM: StateMachine<N, D, R>,
+    TR: Transport<D>,
+    LS: LogStorage<D>,
+    SM: StateMachine<D, R>,
 {
     id: NodeId,
-    node: N,
     config: Config,
-    transport: TR,
+    transport: Arc<TR>,
     log_storage: LS,
     state_machine: SM,
-    rx: mpsc::UnboundedReceiver<Message<N, D, R>>,
+    rx: mpsc::UnboundedReceiver<Message<D, R>>,
     rx_shutdown: oneshot::Receiver<()>,
     last_log_id: LogId,
     current_term: u64,
     voted_for: Option<u64>,
-    membership: MembershipConfig<N>,
+    membership: MembershipConfig,
     last_applied_log_id: LogId,
     target_state: State,
     next_election_timeout: Option<Instant>,
@@ -52,30 +51,27 @@ where
     current_leader: Option<NodeId>,
 }
 
-impl<N, D, R, TR, LS, SM> RaftNode<N, D, R, TR, LS, SM>
+impl<D, R, TR, LS, SM> RaftNode<D, R, TR, LS, SM>
 where
-    N: Node,
     D: Data,
     R: Response,
-    TR: Transport<N, D>,
-    LS: LogStorage<N, D>,
-    SM: StateMachine<N, D, R>,
+    TR: Transport<D>,
+    LS: LogStorage<D>,
+    SM: StateMachine<D, R>,
 {
     pub(super) fn spawn(
         id: NodeId,
-        node: N,
         config: Config,
         transport: TR,
         log_storage: LS,
         state_machine: SM,
-        rx: mpsc::UnboundedReceiver<Message<N, D, R>>,
+        rx: mpsc::UnboundedReceiver<Message<D, R>>,
         rx_shutdown: oneshot::Receiver<()>,
     ) -> JoinHandle<Result<(), Error>> {
         let this = Self {
             id,
-            node,
             config,
-            transport,
+            transport: Arc::new(transport),
             log_storage,
             state_machine,
             rx,
@@ -109,10 +105,10 @@ where
             self.last_log_id = self.last_applied_log_id;
         }
         let is_only_configured_member =
-            self.membership.members.len() == 1 && self.membership.members.contains_key(&self.id);
+            self.membership.members.len() == 1 && self.membership.members.contains(&self.id);
         if is_only_configured_member {
             self.target_state = State::Leader;
-        } else if self.membership.members.contains_key(&self.id) {
+        } else if self.membership.members.contains(&self.id) {
             self.target_state = State::Follower;
         } else {
             self.target_state = State::NonVoter;
@@ -237,7 +233,7 @@ where
 
     async fn handle_append_entries(
         &mut self,
-        request: AppendEntriesRequest<N, D>,
+        request: AppendEntriesRequest<D>,
     ) -> Result<AppendEntriesResponse, Error> {
         if request.term < self.current_term {
             return Ok(AppendEntriesResponse {
@@ -322,8 +318,8 @@ where
         if self.last_log_id.index != 0 {
             Err("not allowed")?
         }
-        let mut members = HashMap::new();
-        members.insert(self.id, self.node.clone());
+        let mut members = HashSet::new();
+        members.insert(self.id);
         self.membership = MembershipConfig {
             members,
             members_after_consensus: None,
@@ -343,7 +339,7 @@ where
         self.state_machine.save_hard_state(hs).await
     }
 
-    async fn append_entry(&mut self, payload: EntryPayload<N, D>) -> Result<u64, Error> {
+    async fn append_entry(&mut self, payload: EntryPayload<D>) -> Result<u64, Error> {
         let log_id = LogId {
             index: self.last_log_id.index + 1,
             term: self.current_term,
@@ -360,16 +356,15 @@ struct ReplicationNode {
     handle: JoinHandle<Result<(), Error>>,
 }
 
-struct RaftLeader<'a, N, D, R, TR, LS, SM>
+struct RaftLeader<'a, D, R, TR, LS, SM>
 where
-    N: Node,
     D: Data,
     R: Response,
-    TR: Transport<N, D>,
-    LS: LogStorage<N, D>,
-    SM: StateMachine<N, D, R>
+    TR: Transport<D>,
+    LS: LogStorage<D>,
+    SM: StateMachine<D, R>
 {
-    node: &'a mut RaftNode<N, D, R, TR, LS, SM>,
+    node: &'a mut RaftNode<D, R, TR, LS, SM>,
     nodes: HashMap<NodeId, ReplicationNode>,
     awaiting_data: Vec<(u64, oneshot::Sender<Result<R, Error>>)>,
     awaiting_config_change: Option<oneshot::Sender<Result<(), Error>>>,
@@ -378,16 +373,15 @@ where
     commit_index: u64,
 }
 
-impl<'a, N, D, R, TR, LS, SM> RaftLeader<'a, N, D, R, TR, LS, SM>
+impl<'a, D, R, TR, LS, SM> RaftLeader<'a, D, R, TR, LS, SM>
 where
-    N: Node,
     D: Data,
     R: Response,
-    TR: Transport<N, D>,
-    LS: LogStorage<N, D>,
-    SM: StateMachine<N, D, R>
+    TR: Transport<D>,
+    LS: LogStorage<D>,
+    SM: StateMachine<D, R>
 {
-    pub(super) fn new(node: &'a mut RaftNode<N, D, R, TR, LS, SM>) -> Self {
+    pub(super) fn new(node: &'a mut RaftNode<D, R, TR, LS, SM>) -> Self {
         Self {
             node,
             nodes: HashMap::new(),
@@ -405,7 +399,7 @@ where
         self.node.current_leader = Some(self.node.id);
         self.commit_initial_leader_entry().await?;
         let (tx_replica, mut rx_replica) = mpsc::unbounded_channel();
-        for (target_id, target_node) in self.node.membership.all_members() {
+        for target_id in self.node.membership.all_members() {
             if target_id == self.node.id {
                 continue;
             }
@@ -413,7 +407,8 @@ where
             let handle = RaftReplication::spawn(
                 self.node.id,
                 target_id,
-                target_node,
+                &self.node.config,
+                self.node.transport.clone(),
                 tx_replica.clone(),
                 rx,
                 self.node.current_term,
@@ -440,8 +435,8 @@ where
                     Message::InitCluster{tx, ..} => {
                         let _ = tx.send(Err("node already initialized".into()));
                     }
-                    Message::AddNode{id, node, tx} => {
-                        self.handle_add_node(id, node, tx).await;
+                    Message::AddNode{id, tx} => {
+                        self.handle_add_node(id, tx).await;
                     }
                     Message::WriteEntry{entry, tx} => {
                         self.handle_write_entry(entry, tx).await;
@@ -477,7 +472,7 @@ where
         }
     }
 
-    async fn handle_add_node(&mut self, id: NodeId, node: N, tx: oneshot::Sender<Result<(), Error>>) {
+    async fn handle_add_node(&mut self, id: NodeId, tx: oneshot::Sender<Result<(), Error>>) {
         if self.awaiting_config_change.is_some() {
             let _ = tx.send(Err("cluster in config change state".into()));
             return;
@@ -488,12 +483,12 @@ where
         let mut membership = self.node.membership.clone();
         assert!(membership.members_after_consensus.is_none());
         let mut members_after_consensus = membership.members.clone();
-        members_after_consensus.insert(id, node);
+        members_after_consensus.insert(id);
         membership.members_after_consensus = Some(members_after_consensus);
         self.handle_write_entry(EntryPayload::ConfigChange(ConfigChangeEntry { membership }), awaiting_joint_tx).await;
     }
 
-    async fn handle_write_entry(&mut self, entry: EntryPayload<N, D>, tx: oneshot::Sender<Result<R, Error>>) {
+    async fn handle_write_entry(&mut self, entry: EntryPayload<D>, tx: oneshot::Sender<Result<R, Error>>) {
         let index = match self.node.append_entry(entry).await {
             Ok(index) => index,
             Err(err) => {

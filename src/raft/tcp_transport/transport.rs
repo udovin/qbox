@@ -8,13 +8,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
+use crate::raft::ws_transport::NodeMetaStorage;
 use crate::raft::{
     AppendEntriesRequest, AppendEntriesResponse, Connection, Data, Error, InstallSnapshotRequest,
-    InstallSnapshotResponse, LogStorage, Node, NodeId, Raft, RequestVoteRequest,
+    InstallSnapshotResponse, LogStorage, NodeId, Raft, RequestVoteRequest,
     RequestVoteResponse, Response, StateMachine, Transport,
 };
-
-impl Node for SocketAddr {}
 
 pub struct TcpConnection<D: Data> {
     stream: TcpStream,
@@ -41,10 +40,10 @@ impl<D: Data + Serialize> TcpConnection<D> {
 }
 
 #[async_trait::async_trait]
-impl<D: Data + Serialize> Connection<SocketAddr, D> for TcpConnection<D> {
+impl<D: Data + Serialize> Connection<D> for TcpConnection<D> {
     async fn append_entries(
         &mut self,
-        request: AppendEntriesRequest<SocketAddr, D>,
+        request: AppendEntriesRequest<D>,
     ) -> Result<AppendEntriesResponse, Error> {
         self.write_message(APPEND_ENTRIES, request).await?;
         self.read_message(APPEND_ENTRIES).await
@@ -67,22 +66,24 @@ impl<D: Data + Serialize> Connection<SocketAddr, D> for TcpConnection<D> {
     }
 }
 
-pub struct TcpTransport {}
+pub struct TcpTransport<NM: NodeMetaStorage<SocketAddr>> {
+    storage: NM,
+}
 
-impl TcpTransport {
-    pub fn new() -> Self {
-        Self {}
+impl<NM: NodeMetaStorage<SocketAddr>> TcpTransport<NM> {
+    pub fn new(storage: NM) -> Self {
+        Self { storage }
     }
 
     pub fn spawn<D, R, LS, SM>(
         addr: SocketAddr,
-        raft: Arc<Raft<SocketAddr, D, R, TcpTransport, LS, SM>>,
+        raft: Arc<Raft<D, R, Self, LS, SM>>,
     ) -> JoinHandle<Result<(), Error>>
     where
         D: Data + Serialize + DeserializeOwned,
         R: Response,
-        LS: LogStorage<SocketAddr, D>,
-        SM: StateMachine<SocketAddr, D, R>,
+        LS: LogStorage<D>,
+        SM: StateMachine<D, R>,
     {
         let server = async move {
             let listener = TcpListener::bind(addr).await?;
@@ -96,13 +97,13 @@ impl TcpTransport {
 
     async fn handle_connection<D, R, LS, SM>(
         mut stream: TcpStream,
-        raft: Arc<Raft<SocketAddr, D, R, TcpTransport, LS, SM>>,
+        raft: Arc<Raft<D, R, Self, LS, SM>>,
     ) -> Result<(), Error>
     where
         D: Data + Serialize + DeserializeOwned,
         R: Response,
-        LS: LogStorage<SocketAddr, D>,
-        SM: StateMachine<SocketAddr, D, R>,
+        LS: LogStorage<D>,
+        SM: StateMachine<D, R>,
     {
         loop {
             let read_kind = stream.read_u64().await?;
@@ -130,10 +131,15 @@ impl TcpTransport {
 }
 
 #[async_trait::async_trait]
-impl<D: Data + Serialize> Transport<SocketAddr, D> for TcpTransport {
+impl<D, NM> Transport<D> for TcpTransport<NM>
+where
+    D: Data + Serialize,
+    NM: NodeMetaStorage<SocketAddr>,
+{
     type Connection = TcpConnection<D>;
 
-    async fn connect(&self, _id: NodeId, node: &SocketAddr) -> Result<TcpConnection<D>, Error> {
+    async fn connect(&self, id: NodeId) -> Result<TcpConnection<D>, Error> {
+        let node = self.storage.get_node_meta(id).await?;
         let stream = TcpStream::connect(node).await?;
         Ok(TcpConnection {
             stream,

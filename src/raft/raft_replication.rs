@@ -1,7 +1,12 @@
+use std::marker::PhantomData;
+use std::sync::Arc;
+use std::time::Duration;
+
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio::time::{Interval, interval};
 
-use super::{NodeId, Node, Error, LogId};
+use super::{NodeId, Error, Config, Transport, Data};
 
 pub(super) enum ReplicationMessage {
     Replicate {
@@ -19,23 +24,35 @@ pub(super) enum ReplicationState {
     Shutdown,
 }
 
-pub(super) struct RaftReplication<N: Node> {
+pub(super) struct RaftReplication<D, TR>
+where
+    D: Data,
+    TR: Transport<D>,
+{
     leader_id: NodeId,
     target_id: NodeId,
-    target_node: N,
     tx: mpsc::UnboundedSender<ReplicationEvent>,
     rx: mpsc::UnboundedReceiver<ReplicationMessage>,
     target_state: ReplicationState,
     current_term: u64,
     last_log_index: u64,
     commit_index: u64,
+    heartbeat: Interval,
+    heartbeat_timeout: Duration,
+    transport: Arc<TR>,
+    _phantom: PhantomData<D>,
 }
 
-impl<N: Node> RaftReplication<N> {
+impl<D, TR> RaftReplication<D, TR>
+where
+    D: Data,
+    TR: Transport<D>,
+{
     pub fn spawn(
         leader_id: NodeId,
         target_id: NodeId,
-        target_node: N,
+        config: &Config,
+        transport: Arc<TR>,
         tx: mpsc::UnboundedSender<ReplicationEvent>,
         rx: mpsc::UnboundedReceiver<ReplicationMessage>,
         current_term: u64,
@@ -45,13 +62,16 @@ impl<N: Node> RaftReplication<N> {
         let this = Self {
             leader_id,
             target_id,
-            target_node,
+            transport,
             tx,
             rx,
             target_state: ReplicationState::Normal,
             current_term,
             last_log_index,
             commit_index,
+            heartbeat: interval(config.heartbeat_timeout),
+            heartbeat_timeout: config.heartbeat_timeout,
+            _phantom: PhantomData,
         };
         tokio::spawn(this.run())
     }
@@ -72,6 +92,9 @@ impl<N: Node> RaftReplication<N> {
                 return Ok(());
             }
             tokio::select! {
+                _ = self.heartbeat.tick() => {
+
+                }
                 Some(message) = self.rx.recv() => match message {
                     ReplicationMessage::Replicate { last_log_index, commit_index } => {
                         self.last_log_index = last_log_index;
@@ -91,6 +114,9 @@ impl<N: Node> RaftReplication<N> {
                 return Ok(());
             }
             tokio::select! {
+                _ = self.heartbeat.tick() => {
+
+                }
                 Some(message) = self.rx.recv() => match message {
                     ReplicationMessage::Replicate { last_log_index, commit_index } => {
                         self.last_log_index = last_log_index;
