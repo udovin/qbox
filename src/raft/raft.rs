@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 
@@ -37,9 +38,9 @@ where
     pub fn new(
         id: NodeId,
         config: Config,
-        transport: TR,
-        log_storage: LS,
-        state_machine: SM,
+        transport: Arc<TR>,
+        log_storage: Arc<LS>,
+        state_machine: Arc<SM>,
     ) -> Result<Self, Error> {
         config.validate()?;
         let (tx, rx) = mpsc::unbounded_channel();

@@ -89,11 +89,11 @@ impl<D: Data + Serialize> Connection<D> for WsConnection<D> {
 }
 
 pub struct WsTransport<NM: NodeMetaStorage<SocketAddr>> {
-    storage: NM,
+    storage: Arc<NM>,
 }
 
 impl<NM: NodeMetaStorage<SocketAddr>> WsTransport<NM> {
-    pub fn new(storage: NM) -> Self {
+    pub fn new(storage: Arc<NM>) -> Self {
         Self { storage }
     }
 }

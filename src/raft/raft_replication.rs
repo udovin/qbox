@@ -4,9 +4,10 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio::time::{Interval, interval};
+use tokio::time::{sleep_until, Instant};
+use warp::filters::log::Log;
 
-use super::{NodeId, Error, Config, Transport, Data};
+use super::{NodeId, Error, Config, Transport, Data, LogId, Connection, AppendEntriesRequest};
 
 pub(super) enum ReplicationMessage {
     Replicate {
@@ -31,15 +32,15 @@ where
 {
     leader_id: NodeId,
     target_id: NodeId,
+    transport: Arc<TR>,
     tx: mpsc::UnboundedSender<ReplicationEvent>,
     rx: mpsc::UnboundedReceiver<ReplicationMessage>,
     target_state: ReplicationState,
     current_term: u64,
     last_log_index: u64,
     commit_index: u64,
-    heartbeat: Interval,
     heartbeat_timeout: Duration,
-    transport: Arc<TR>,
+    prev_log_id: LogId,
     _phantom: PhantomData<D>,
 }
 
@@ -69,8 +70,8 @@ where
             current_term,
             last_log_index,
             commit_index,
-            heartbeat: interval(config.heartbeat_timeout),
             heartbeat_timeout: config.heartbeat_timeout,
+            prev_log_id: LogId { index: last_log_index, term: current_term },
             _phantom: PhantomData,
         };
         tokio::spawn(this.run())
@@ -91,9 +92,10 @@ where
             if !matches!(self.target_state, ReplicationState::Normal) {
                 return Ok(());
             }
+            let heartbeat_timeout = sleep_until(Instant::now() + self.heartbeat_timeout);
             tokio::select! {
-                _ = self.heartbeat.tick() => {
-
+                _ = heartbeat_timeout => {
+                    self.replicate_append_entries().await?;
                 }
                 Some(message) = self.rx.recv() => match message {
                     ReplicationMessage::Replicate { last_log_index, commit_index } => {
@@ -113,8 +115,9 @@ where
             if !matches!(self.target_state, ReplicationState::Snapshot) {
                 return Ok(());
             }
+            let heartbeat_timeout = sleep_until(Instant::now() + self.heartbeat_timeout);
             tokio::select! {
-                _ = self.heartbeat.tick() => {
+                _ = heartbeat_timeout => {
 
                 }
                 Some(message) = self.rx.recv() => match message {
@@ -128,5 +131,25 @@ where
                 }
             }
         }
+    }
+
+    async fn replicate_append_entries(&mut self) -> Result<(), Error> {
+        todo!()
+        // let request = AppendEntriesRequest {
+        //     term: self.current_term,
+        //     leader_id: self.leader_id,
+        //     prev_log_id: self.prev_log_id,
+        //     leader_commit: self.commit_index,
+        //     entries: vec![],
+        // };
+        // let mut connection = self.transport.connect(self.target_id).await?;
+        // let response = match connection.append_entries(request).await {
+        //     Err(err) => return Err(err),
+        //     Ok(response) => response,
+        // };
+        // if !response.success {
+        //     todo!();
+        // }
+        // assert!(response.term == self.current_term);
     }
 }

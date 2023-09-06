@@ -36,8 +36,8 @@ where
     id: NodeId,
     config: Config,
     transport: Arc<TR>,
-    log_storage: LS,
-    state_machine: SM,
+    log_storage: Arc<LS>,
+    state_machine: Arc<SM>,
     rx: mpsc::UnboundedReceiver<Message<D, R>>,
     rx_shutdown: oneshot::Receiver<()>,
     last_log_id: LogId,
@@ -62,16 +62,16 @@ where
     pub(super) fn spawn(
         id: NodeId,
         config: Config,
-        transport: TR,
-        log_storage: LS,
-        state_machine: SM,
+        transport: Arc<TR>,
+        log_storage: Arc<LS>,
+        state_machine: Arc<SM>,
         rx: mpsc::UnboundedReceiver<Message<D, R>>,
         rx_shutdown: oneshot::Receiver<()>,
     ) -> JoinHandle<Result<(), Error>> {
         let this = Self {
             id,
             config,
-            transport: Arc::new(transport),
+            transport,
             log_storage,
             state_machine,
             rx,
@@ -370,7 +370,6 @@ where
     awaiting_config_change: Option<oneshot::Sender<Result<(), Error>>>,
     awaiting_joint: FuturesOrdered<oneshot::Receiver<Result<R, Error>>>,
     awaiting_uniform: FuturesOrdered<oneshot::Receiver<Result<R, Error>>>,
-    commit_index: u64,
 }
 
 impl<'a, D, R, TR, LS, SM> RaftLeader<'a, D, R, TR, LS, SM>
@@ -389,7 +388,6 @@ where
             awaiting_config_change: None,
             awaiting_joint: FuturesOrdered::default(),
             awaiting_uniform: FuturesOrdered::default(),
-            commit_index: 0,
         }
     }
 
@@ -413,7 +411,7 @@ where
                 rx,
                 self.node.current_term,
                 self.node.last_log_id.index,
-                self.commit_index,
+                self.node.last_applied_log_id.index,
             );
             self.nodes.insert(target_id, ReplicationNode { tx, handle });
         }
@@ -500,7 +498,7 @@ where
         for node in self.nodes.values() {
             let _ = node.tx.send(ReplicationMessage::Replicate {
                 last_log_index: index,
-                commit_index: self.commit_index,
+                commit_index: self.node.last_applied_log_id.index,
             });
         }
     }

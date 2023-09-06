@@ -20,13 +20,13 @@ pub trait LogStorage<D: Data>: Send + Sync + 'static {
 
     async fn read_entries(&self, from: u64, to: u64) -> Result<Vec<Entry<D>>, Error>;
 
-    async fn append_entries(&mut self, entries: Vec<Entry<D>>) -> Result<(), Error>;
+    async fn append_entries(&self, entries: Vec<Entry<D>>) -> Result<(), Error>;
 
     // Purge logs up to `index`, inclusive (`entry.index` <= `index`).
-    async fn purge(&mut self, index: u64) -> Result<(), Error>;
+    async fn purge(&self, index: u64) -> Result<(), Error>;
 
     // Truncate logs since `index`, inclusive (`entry.index` >= `index`).
-    async fn truncate(&mut self, index: u64) -> Result<(), Error>;
+    async fn truncate(&self, index: u64) -> Result<(), Error>;
 }
 
 #[async_trait::async_trait]
@@ -35,9 +35,9 @@ pub trait StateMachine<D: Data, R: Response>: Send + Sync + 'static {
 
     async fn get_membership_config(&self) -> Result<MembershipConfig, Error>;
 
-    async fn apply_entries(&mut self, entires: Vec<Entry<D>>) -> Result<Vec<R>, Error>;
+    async fn apply_entries(&self, entires: Vec<Entry<D>>) -> Result<Vec<R>, Error>;
 
     async fn get_hard_state(&self) -> Result<HardState, Error>;
 
-    async fn save_hard_state(&mut self, hard_state: HardState) -> Result<(), Error>;
+    async fn save_hard_state(&self, hard_state: HardState) -> Result<(), Error>;
 }

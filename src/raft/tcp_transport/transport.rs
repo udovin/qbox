@@ -67,11 +67,11 @@ impl<D: Data + Serialize> Connection<D> for TcpConnection<D> {
 }
 
 pub struct TcpTransport<NM: NodeMetaStorage<SocketAddr>> {
-    storage: NM,
+    storage: Arc<NM>,
 }
 
 impl<NM: NodeMetaStorage<SocketAddr>> TcpTransport<NM> {
-    pub fn new(storage: NM) -> Self {
+    pub fn new(storage: Arc<NM>) -> Self {
         Self { storage }
     }
 

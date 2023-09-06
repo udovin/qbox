@@ -1,11 +1,7 @@
 use clap::{Args, Parser, Subcommand};
-use qbox::raft::mem_storage::{Action, ActionResponse, MemLogStorage, MemStateMachine};
+use qbox::raft::mem_storage::{Action, MemLogStorage, MemStateMachine};
 use qbox::raft::ws_transport::{handle_connection, WsTransport, NodeMetaStorage};
-use qbox::raft::{
-    Config, Data, Entry, Error, HardState, LogId,
-    LogStorage, MembershipConfig, Raft, Response, StateMachine,
-    Transport, NodeId,
-};
+use qbox::raft::{Config, Data, Error, LogStorage, Raft, Response, StateMachine, Transport, NodeId};
 use rand::{thread_rng, Rng};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -15,7 +11,6 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use warp::Filter;
 
 #[derive(Args, Debug)]
@@ -66,44 +61,6 @@ fn get_node_id(dir: &Path) -> Result<u64, std::io::Error> {
     }
 }
 
-struct SmWrap(Arc<RwLock<MemStateMachine>>);
-
-#[async_trait::async_trait]
-impl StateMachine<Action, ActionResponse> for SmWrap {
-    async fn get_applied_log_id(&self) -> Result<LogId, Error> {
-        self.0.read().await.get_applied_log_id().await
-    }
-
-    async fn get_membership_config(&self) -> Result<MembershipConfig, Error> {
-        self.0.read().await.get_membership_config().await
-    }
-
-    async fn apply_entries(
-        &mut self,
-        entires: Vec<Entry<Action>>,
-    ) -> Result<Vec<ActionResponse>, Error> {
-        self.0.write().await.apply_entries(entires).await
-    }
-
-    async fn get_hard_state(&self) -> Result<HardState, Error> {
-        self.0.read().await.get_hard_state().await
-    }
-
-    async fn save_hard_state(&mut self, hard_state: HardState) -> Result<(), Error> {
-        self.0.write().await.save_hard_state(hard_state).await
-    }
-}
-
-#[async_trait::async_trait]
-impl NodeMetaStorage<SocketAddr> for SmWrap {
-    async fn get_node_meta(&self, id: NodeId) -> Result<SocketAddr, Error> {
-        match self.0.read().await.get(&format!("nodes/{}", id)) {
-            Some(addr) => Ok(addr.parse()?),
-            None => Err("node not found".into()),
-        }
-    }
-}
-
 async fn raft_handle<D, R, TR, LS, SM>(
     ws: warp::ws::Ws,
     raft: Arc<Raft<D, R, TR, LS, SM>>,
@@ -147,16 +104,16 @@ where
 
 async fn async_server_main(args: ServerArgs) {
     let config = Config::default();
-    let log_storage = MemLogStorage::new();
-    let state_machine = Arc::new(RwLock::new(MemStateMachine::new()));
-    let transport = WsTransport::new(SmWrap(state_machine.clone()));
+    let log_storage = Arc::new(MemLogStorage::new());
+    let state_machine = Arc::new(MemStateMachine::new());
+    let transport = Arc::new(WsTransport::new(state_machine.clone()));
     let node_id = get_node_id(args.data_dir.as_path()).unwrap();
     let raft = Raft::new(
         node_id,
         config,
         transport,
         log_storage,
-        SmWrap(state_machine.clone()),
+        state_machine.clone(),
     ).unwrap();
     let raft = Arc::new(raft);
     let raft_route = {
