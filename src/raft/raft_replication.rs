@@ -1,23 +1,30 @@
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep_until, Instant};
-use warp::filters::log::Log;
 
-use super::{NodeId, Error, Config, Transport, Data, LogId, Connection, AppendEntriesRequest};
+use super::{Connection, NodeId, Error, Config, Transport, Data, LogId, LogStorage, AppendEntriesRequest, Entry};
 
-pub(super) enum ReplicationMessage {
+pub(super) enum ReplicationMessage<D: Data> {
     Replicate {
-        last_log_index: u64,
+        entry: Arc<Entry<D>>,
         commit_index: u64,
     },
     Terminate,
 }
 
-pub(super) struct ReplicationEvent {}
+pub(super) enum ReplicationEvent {
+    UpdateMatchIndex {
+        node_id: NodeId,
+        log_id: LogId,
+    },
+    RevertToFollower {
+        node_id: NodeId,
+        term: u64,
+    }
+}
 
 pub(super) enum ReplicationState {
     Normal,
@@ -25,37 +32,40 @@ pub(super) enum ReplicationState {
     Shutdown,
 }
 
-pub(super) struct RaftReplication<D, TR>
+pub(super) struct RaftReplication<D, TR, LS>
 where
     D: Data,
     TR: Transport<D>,
+    LS: LogStorage<D>,
 {
     leader_id: NodeId,
     target_id: NodeId,
     transport: Arc<TR>,
+    log_storage: Arc<LS>,
     tx: mpsc::UnboundedSender<ReplicationEvent>,
-    rx: mpsc::UnboundedReceiver<ReplicationMessage>,
+    rx: mpsc::UnboundedReceiver<ReplicationMessage<D>>,
     target_state: ReplicationState,
     current_term: u64,
     last_log_index: u64,
     commit_index: u64,
     heartbeat_timeout: Duration,
     prev_log_id: LogId,
-    _phantom: PhantomData<D>,
 }
 
-impl<D, TR> RaftReplication<D, TR>
+impl<D, TR, LS> RaftReplication<D, TR, LS>
 where
     D: Data,
     TR: Transport<D>,
+    LS: LogStorage<D>,
 {
     pub fn spawn(
         leader_id: NodeId,
         target_id: NodeId,
         config: &Config,
         transport: Arc<TR>,
+        log_storage: Arc<LS>,
         tx: mpsc::UnboundedSender<ReplicationEvent>,
-        rx: mpsc::UnboundedReceiver<ReplicationMessage>,
+        rx: mpsc::UnboundedReceiver<ReplicationMessage<D>>,
         current_term: u64,
         last_log_index: u64,
         commit_index: u64,
@@ -64,6 +74,7 @@ where
             leader_id,
             target_id,
             transport,
+            log_storage,
             tx,
             rx,
             target_state: ReplicationState::Normal,
@@ -72,7 +83,6 @@ where
             commit_index,
             heartbeat_timeout: config.heartbeat_timeout,
             prev_log_id: LogId { index: last_log_index, term: current_term },
-            _phantom: PhantomData,
         };
         tokio::spawn(this.run())
     }
@@ -98,9 +108,11 @@ where
                     self.replicate_append_entries().await?;
                 }
                 Some(message) = self.rx.recv() => match message {
-                    ReplicationMessage::Replicate { last_log_index, commit_index } => {
-                        self.last_log_index = last_log_index;
+                    ReplicationMessage::Replicate { entry, commit_index } => {
+                        assert!(self.current_term == entry.log_id.term);
+                        self.last_log_index = entry.log_id.index;
                         self.commit_index = commit_index;
+                        self.replicate_append_entries().await?;
                     }
                     ReplicationMessage::Terminate => {
                         self.target_state = ReplicationState::Shutdown;
@@ -115,14 +127,10 @@ where
             if !matches!(self.target_state, ReplicationState::Snapshot) {
                 return Ok(());
             }
-            let heartbeat_timeout = sleep_until(Instant::now() + self.heartbeat_timeout);
             tokio::select! {
-                _ = heartbeat_timeout => {
-
-                }
                 Some(message) = self.rx.recv() => match message {
-                    ReplicationMessage::Replicate { last_log_index, commit_index } => {
-                        self.last_log_index = last_log_index;
+                    ReplicationMessage::Replicate { entry, commit_index } => {
+                        self.last_log_index = entry.log_id.index;
                         self.commit_index = commit_index;
                     }
                     ReplicationMessage::Terminate => {
@@ -134,22 +142,34 @@ where
     }
 
     async fn replicate_append_entries(&mut self) -> Result<(), Error> {
-        todo!()
-        // let request = AppendEntriesRequest {
-        //     term: self.current_term,
-        //     leader_id: self.leader_id,
-        //     prev_log_id: self.prev_log_id,
-        //     leader_commit: self.commit_index,
-        //     entries: vec![],
-        // };
-        // let mut connection = self.transport.connect(self.target_id).await?;
-        // let response = match connection.append_entries(request).await {
-        //     Err(err) => return Err(err),
-        //     Ok(response) => response,
-        // };
-        // if !response.success {
-        //     todo!();
-        // }
-        // assert!(response.term == self.current_term);
+        let entries = self.log_storage.read_entries(self.prev_log_id.index + 1, self.last_log_index + 1).await?;
+        let request = AppendEntriesRequest {
+            term: self.current_term,
+            leader_id: self.leader_id,
+            prev_log_id: self.prev_log_id,
+            leader_commit: self.commit_index,
+            entries,
+        };
+        let mut connection = self.transport.connect(self.target_id).await?;
+        let response = match connection.append_entries(request).await {
+            Err(err) => return Err(err),
+            Ok(response) => response,
+        };
+        if response.term > self.current_term {
+            self.tx.send(ReplicationEvent::RevertToFollower {
+                node_id: self.target_id,
+                term: response.term,
+            })?;
+        }
+        if !response.success {
+            return Ok(());
+        }
+        self.prev_log_id.index = self.last_log_index;
+        self.prev_log_id.term = self.current_term;
+        self.tx.send(ReplicationEvent::UpdateMatchIndex {
+            node_id: self.target_id,
+            log_id: self.prev_log_id,
+        })?;
+        Ok(())
     }
 }

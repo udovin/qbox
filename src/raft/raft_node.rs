@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::sleep_until;
 
-use super::raft_replication::ReplicationMessage;
+use super::raft_replication::{ReplicationEvent, ReplicationMessage};
 use super::{
     AppendEntriesRequest, AppendEntriesResponse, Config, ConfigChangeEntry, Data, Entry,
     EntryPayload, Error, HardState, InstallSnapshotRequest, InstallSnapshotResponse, LogId,
@@ -115,7 +115,7 @@ where
         }
         loop {
             match &self.target_state {
-                State::Leader => RaftLeader::new(&mut self).run().await?,//self.run_leader().await?,
+                State::Leader => RaftLeader::new(&mut self).run().await?,
                 State::Candidate => self.run_candidate().await?,
                 State::Follower => self.run_follower().await?,
                 State::NonVoter => self.run_non_voter().await?,
@@ -339,20 +339,20 @@ where
         self.state_machine.save_hard_state(hs).await
     }
 
-    async fn append_entry(&mut self, payload: EntryPayload<D>) -> Result<u64, Error> {
+    async fn append_entry(&mut self, payload: EntryPayload<D>) -> Result<Entry<D>, Error> {
         let log_id = LogId {
             index: self.last_log_id.index + 1,
             term: self.current_term,
         };
         let entry = Entry { log_id, payload };
-        self.log_storage.append_entries(vec![entry]).await?;
+        self.log_storage.append_entries(vec![entry.clone()]).await?;
         self.last_log_id = log_id;
-        Ok(log_id.index)
+        Ok(entry)
     }
 }
 
-struct ReplicationNode {
-    tx: mpsc::UnboundedSender<ReplicationMessage>,
+struct ReplicationNode<D: Data> {
+    tx: mpsc::UnboundedSender<ReplicationMessage<D>>,
     handle: JoinHandle<Result<(), Error>>,
 }
 
@@ -365,7 +365,7 @@ where
     SM: StateMachine<D, R>
 {
     node: &'a mut RaftNode<D, R, TR, LS, SM>,
-    nodes: HashMap<NodeId, ReplicationNode>,
+    nodes: HashMap<NodeId, ReplicationNode<D>>,
     awaiting_data: Vec<(u64, oneshot::Sender<Result<R, Error>>)>,
     awaiting_config_change: Option<oneshot::Sender<Result<(), Error>>>,
     awaiting_joint: FuturesOrdered<oneshot::Receiver<Result<R, Error>>>,
@@ -407,6 +407,7 @@ where
                 target_id,
                 &self.node.config,
                 self.node.transport.clone(),
+                self.node.log_storage.clone(),
                 tx_replica.clone(),
                 rx,
                 self.node.current_term,
@@ -440,29 +441,30 @@ where
                         self.handle_write_entry(entry, tx).await;
                     }
                 },
-                Some(result) = self.awaiting_joint.next() => {
-                    match result {
-                        Ok(_) => todo!(),
-                        Err(err) => {
-                            if let Some(tx) = self.awaiting_config_change.take() {
-                                let _ = tx.send(Err(err.into()));
-                            }
+                Some(result) = self.awaiting_joint.next() => match result {
+                    Ok(_) => todo!(),
+                    Err(err) => {
+                        if let Some(tx) = self.awaiting_config_change.take() {
+                            let _ = tx.send(Err(err.into()));
                         }
                     }
-                }
-                Some(result) = self.awaiting_uniform.next() => {
-                    match result {
-                        Ok(_) => todo!(),
-                        Err(err) => {
-                            if let Some(tx) = self.awaiting_config_change.take() {
-                                let _ = tx.send(Err(err.into()));
-                            }
+                },
+                Some(result) = self.awaiting_uniform.next() => match result {
+                    Ok(_) => todo!(),
+                    Err(err) => {
+                        if let Some(tx) = self.awaiting_config_change.take() {
+                            let _ = tx.send(Err(err.into()));
                         }
                     }
-                }
-                Some(event) = rx_replica.recv() => {
+                },
+                Some(event) = rx_replica.recv() => match event {
+                    ReplicationEvent::UpdateMatchIndex { node_id, log_id } => {
 
-                }
+                    }
+                    ReplicationEvent::RevertToFollower { node_id, term } => {
+                        self.revert_to_follower(node_id, term).await?
+                    }
+                },
                 Ok(_) = &mut self.node.rx_shutdown => {
                     self.node.target_state = State::Shutdown;
                 }
@@ -487,17 +489,18 @@ where
     }
 
     async fn handle_write_entry(&mut self, entry: EntryPayload<D>, tx: oneshot::Sender<Result<R, Error>>) {
-        let index = match self.node.append_entry(entry).await {
-            Ok(index) => index,
+        let entry = match self.node.append_entry(entry).await {
+            Ok(entry) => entry,
             Err(err) => {
                 let _ = tx.send(Err(err.into()));
                 return;
             }
         };
-        self.awaiting_data.push((index, tx));
+        self.awaiting_data.push((entry.log_id.index, tx));
+        let entry = Arc::new(entry);
         for node in self.nodes.values() {
             let _ = node.tx.send(ReplicationMessage::Replicate {
-                last_log_index: index,
+                entry: entry.clone(),
                 commit_index: self.node.last_applied_log_id.index,
             });
         }
@@ -511,6 +514,21 @@ where
             });
         }
         self.node.append_entry(payload).await?;
+        Ok(())
+    }
+
+    async fn revert_to_follower(&mut self, _: NodeId, term: u64) -> Result<(), Error> {
+        if term < self.node.current_term {
+            Err("cannot revert to follower with lower term")?
+        }
+        self.node.current_term = term;
+        self.node.voted_for = None;
+        self.node.save_hard_state().await?;
+        if self.node.membership.all_members().contains(&self.node.id) {
+            self.node.target_state = State::Follower;
+        } else {
+            self.node.target_state = State::NonVoter;
+        }
         Ok(())
     }
 }

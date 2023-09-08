@@ -4,7 +4,7 @@ use super::{
 };
 
 #[async_trait::async_trait]
-pub trait Connection<D: Data> {
+pub trait Connection<D: Data>: Send {
     async fn append_entries(
         &mut self,
         request: AppendEntriesRequest<D>,
