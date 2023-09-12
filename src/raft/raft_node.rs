@@ -496,6 +496,18 @@ where
                 return;
             }
         };
+        if self.nodes.is_empty() {
+            let entries = self.node.log_storage
+                .read_entries(
+                    self.node.last_applied_log_id.index + 1,
+                    entry.log_id.index + 1,
+                )
+                .await.unwrap();
+            let result = self.node.state_machine.apply_entries(entries).await.unwrap();
+            self.node.last_applied_log_id = self.node.state_machine.get_applied_log_id().await.unwrap();
+            let _ = tx.send(Ok(result.into_iter().next().unwrap()));
+            return;
+        }
         self.awaiting_data.push((entry.log_id.index, tx));
         let entry = Arc::new(entry);
         for node in self.nodes.values() {

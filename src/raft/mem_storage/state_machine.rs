@@ -74,22 +74,24 @@ impl StateMachine<Action, ActionResponse> for MemStateMachine {
         let mut inner = self.inner.write().await;
         for entry in entires.into_iter() {
             assert!(inner.applied_log_id.index < entry.log_id.index);
-            match entry.payload {
-                EntryPayload::Blank => {}
+            let result = match entry.payload {
+                EntryPayload::Blank => {
+                    ActionResponse(None)
+                }
                 EntryPayload::ConfigChange(config_change) => {
                     inner.membership = config_change.membership;
+                    ActionResponse(None)
                 }
-                EntryPayload::Data(data) => {
-                    match data.data {
-                        Action::Set { key, value } => {
-                            resp.push(ActionResponse(inner.data.insert(key, value)));
-                        }
-                        Action::Delete { key } => {
-                            resp.push(ActionResponse(inner.data.remove(&key)));
-                        }
-                    };
+                EntryPayload::Data(data) => match data.data {
+                    Action::Set { key, value } => {
+                        ActionResponse(inner.data.insert(key, value))
+                    }
+                    Action::Delete { key } => {
+                        ActionResponse(inner.data.remove(&key))
+                    }
                 }
             };
+            resp.push(result);
             inner.applied_log_id = entry.log_id;
         }
         Ok(resp)
