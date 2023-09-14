@@ -1,5 +1,6 @@
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
+use std::iter::once;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -8,6 +9,7 @@ use futures_util::stream::FuturesOrdered;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::sleep_until;
+use warp::filters::log::Log;
 
 use super::raft_replication::{ReplicationEvent, ReplicationMessage};
 use super::{
@@ -354,6 +356,7 @@ where
 struct ReplicationNode<D: Data> {
     tx: mpsc::UnboundedSender<ReplicationMessage<D>>,
     handle: JoinHandle<Result<(), Error>>,
+    match_log_id: LogId,
 }
 
 struct RaftLeader<'a, D, R, TR, LS, SM>
@@ -414,7 +417,11 @@ where
                 self.node.last_log_id.index,
                 self.node.last_applied_log_id.index,
             );
-            self.nodes.insert(target_id, ReplicationNode { tx, handle });
+            self.nodes.insert(target_id, ReplicationNode {
+                tx,
+                handle,
+                match_log_id: LogId::default()
+            });
         }
         loop {
             if !matches!(self.node.target_state, State::Leader) {
@@ -459,10 +466,10 @@ where
                 },
                 Some(event) = rx_replica.recv() => match event {
                     ReplicationEvent::UpdateMatchIndex { node_id, log_id } => {
-
+                        self.handle_update_match_index(node_id, log_id).await?;
                     }
                     ReplicationEvent::RevertToFollower { node_id, term } => {
-                        self.revert_to_follower(node_id, term).await?
+                        self.revert_to_follower(node_id, term).await?;
                     }
                 },
                 Ok(_) = &mut self.node.rx_shutdown => {
@@ -540,6 +547,37 @@ where
             self.node.target_state = State::Follower;
         } else {
             self.node.target_state = State::NonVoter;
+        }
+        Ok(())
+    }
+
+    async fn handle_update_match_index(&mut self, node_id: NodeId, log_id: LogId) -> Result<(), Error> {
+        {
+            let node = match self.nodes.get_mut(&node_id) {
+                Some(node) => node,
+                None => Err("cannot update match index")?,
+            };
+            node.match_log_id = log_id;
+        }
+        let mut all_indexes: Vec<_> = self.nodes
+            .iter()
+            .map(|node| node.1.match_log_id.index)
+            .chain(once(self.node.last_applied_log_id.index))
+            .collect();
+        let (_, match_index, _) = all_indexes.select_nth_unstable((self.nodes.len() + 1) / 2);
+        let match_index = *match_index;
+        if match_index <= self.node.last_applied_log_id.index {
+            return Ok(());
+        }
+        let entries = self.node.log_storage
+            .read_entries(self.node.last_applied_log_id.index + 1, match_index + 1)
+            .await?;
+        self.node.state_machine.apply_entries(entries).await?;
+        self.node.last_applied_log_id = self.node.state_machine.get_applied_log_id().await?;
+        for node in self.nodes.values() {
+            let _ = node.tx.send(ReplicationMessage::Commit {
+                commit_index: self.node.last_applied_log_id.index,
+            });
         }
         Ok(())
     }

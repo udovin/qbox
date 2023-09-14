@@ -12,6 +12,9 @@ pub(super) enum ReplicationMessage<D: Data> {
         entry: Arc<Entry<D>>,
         commit_index: u64,
     },
+    Commit {
+        commit_index: u64,
+    },
     Terminate,
 }
 
@@ -110,7 +113,13 @@ where
                 Some(message) = self.rx.recv() => match message {
                     ReplicationMessage::Replicate { entry, commit_index } => {
                         assert!(self.current_term == entry.log_id.term);
+                        assert!(self.commit_index <= commit_index);
                         self.last_log_index = entry.log_id.index;
+                        self.commit_index = commit_index;
+                        self.replicate_append_entries().await?;
+                    }
+                    ReplicationMessage::Commit { commit_index } => {
+                        assert!(self.commit_index <= commit_index);
                         self.commit_index = commit_index;
                         self.replicate_append_entries().await?;
                     }
@@ -130,7 +139,12 @@ where
             tokio::select! {
                 Some(message) = self.rx.recv() => match message {
                     ReplicationMessage::Replicate { entry, commit_index } => {
+                        assert!(self.commit_index <= commit_index);
                         self.last_log_index = entry.log_id.index;
+                        self.commit_index = commit_index;
+                    }
+                    ReplicationMessage::Commit { commit_index } => {
+                        assert!(self.commit_index <= commit_index);
                         self.commit_index = commit_index;
                     }
                     ReplicationMessage::Terminate => {
