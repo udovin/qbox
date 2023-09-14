@@ -512,6 +512,7 @@ where
                 .await.unwrap();
             let result = self.node.state_machine.apply_entries(entries).await.unwrap();
             self.node.last_applied_log_id = self.node.state_machine.get_applied_log_id().await.unwrap();
+            self.node.membership = self.node.state_machine.get_membership_config().await.unwrap();
             let _ = tx.send(Ok(result.into_iter().next().unwrap()));
             return;
         }
@@ -574,6 +575,7 @@ where
             .await?;
         self.node.state_machine.apply_entries(entries).await?;
         self.node.last_applied_log_id = self.node.state_machine.get_applied_log_id().await?;
+        self.node.membership = self.node.state_machine.get_membership_config().await?;
         for node in self.nodes.values() {
             let _ = node.tx.send(ReplicationMessage::Commit {
                 commit_index: self.node.last_applied_log_id.index,
