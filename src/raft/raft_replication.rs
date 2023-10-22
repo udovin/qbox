@@ -157,6 +157,7 @@ where
 
     async fn replicate_append_entries(&mut self) -> Result<(), Error> {
         let entries = self.log_storage.read_entries(self.prev_log_id.index + 1, self.last_log_index + 1).await?;
+        println!("replicate entries: {}", entries.len());
         let request = AppendEntriesRequest {
             term: self.current_term,
             leader_id: self.leader_id,

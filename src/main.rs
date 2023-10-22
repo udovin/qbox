@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 use qbox::raft::mem_storage::{Action, MemLogStorage, MemStateMachine};
-use qbox::raft::ws_transport::{handle_connection, WsTransport, NodeMetaStorage};
-use qbox::raft::{Config, Data, Error, LogStorage, Raft, Response, StateMachine, Transport, NodeId};
+use qbox::raft::ws_transport::{handle_connection, WsTransport};
+use qbox::raft::{Config, Data, LogStorage, Raft, Response, StateMachine, Transport, NodeId};
 use rand::{thread_rng, Rng};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -136,6 +136,7 @@ async fn async_server_main(args: ServerArgs) {
     let server = warp::serve(routes).run(args.addr);
     println!("Node with id {}", node_id);
     if let Some(addr) = args.join {
+        println!("Joining cluster");
         let client = reqwest::Client::new();
         let _ = client.post(format!("http://{}/raft/add-node", addr))
             .json(&AddNodeMessage {
@@ -143,6 +144,8 @@ async fn async_server_main(args: ServerArgs) {
                 node: args.addr,
             })
             .send().await.unwrap();
+            
+        println!("Joined cluster");
     } else if args.init {
         println!("Initializing cluster");
         raft.init_cluster().await.unwrap();

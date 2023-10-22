@@ -9,7 +9,6 @@ use futures_util::stream::FuturesOrdered;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::sleep_until;
-use warp::filters::log::Log;
 
 use super::raft_replication::{ReplicationEvent, ReplicationMessage};
 use super::{
@@ -373,6 +372,8 @@ where
     awaiting_config_change: Option<oneshot::Sender<Result<(), Error>>>,
     awaiting_joint: FuturesOrdered<oneshot::Receiver<Result<R, Error>>>,
     awaiting_uniform: FuturesOrdered<oneshot::Receiver<Result<R, Error>>>,
+    tx_replica: mpsc::UnboundedSender<ReplicationEvent>,
+    rx_replica: mpsc::UnboundedReceiver<ReplicationEvent>,
 }
 
 impl<'a, D, R, TR, LS, SM> RaftLeader<'a, D, R, TR, LS, SM>
@@ -384,6 +385,7 @@ where
     SM: StateMachine<D, R>
 {
     pub(super) fn new(node: &'a mut RaftNode<D, R, TR, LS, SM>) -> Self {
+        let (tx_replica, mut rx_replica) = mpsc::unbounded_channel();
         Self {
             node,
             nodes: HashMap::new(),
@@ -391,6 +393,8 @@ where
             awaiting_config_change: None,
             awaiting_joint: FuturesOrdered::default(),
             awaiting_uniform: FuturesOrdered::default(),
+            tx_replica,
+            rx_replica,
         }
     }
 
@@ -399,30 +403,7 @@ where
         self.node.last_heartbeat = None;
         self.node.current_leader = Some(self.node.id);
         self.commit_initial_leader_entry().await?;
-        let (tx_replica, mut rx_replica) = mpsc::unbounded_channel();
-        for target_id in self.node.membership.all_members() {
-            if target_id == self.node.id {
-                continue;
-            }
-            let (tx, rx) = mpsc::unbounded_channel();
-            let handle = RaftReplication::spawn(
-                self.node.id,
-                target_id,
-                &self.node.config,
-                self.node.transport.clone(),
-                self.node.log_storage.clone(),
-                tx_replica.clone(),
-                rx,
-                self.node.current_term,
-                self.node.last_log_id.index,
-                self.node.last_applied_log_id.index,
-            );
-            self.nodes.insert(target_id, ReplicationNode {
-                tx,
-                handle,
-                match_log_id: LogId::default()
-            });
-        }
+        self.update_replication().await;
         loop {
             if !matches!(self.node.target_state, State::Leader) {
                 return Ok(());
@@ -449,7 +430,7 @@ where
                     }
                 },
                 Some(result) = self.awaiting_joint.next() => match result {
-                    Ok(_) => todo!(),
+                    Ok(_) => self.handle_joint_consensus().await,
                     Err(err) => {
                         if let Some(tx) = self.awaiting_config_change.take() {
                             let _ = tx.send(Err(err.into()));
@@ -457,14 +438,14 @@ where
                     }
                 },
                 Some(result) = self.awaiting_uniform.next() => match result {
-                    Ok(_) => todo!(),
+                    Ok(_) => self.handle_uniform_consensus().await,
                     Err(err) => {
                         if let Some(tx) = self.awaiting_config_change.take() {
                             let _ = tx.send(Err(err.into()));
                         }
                     }
                 },
-                Some(event) = rx_replica.recv() => match event {
+                Some(event) = self.rx_replica.recv() => match event {
                     ReplicationEvent::UpdateMatchIndex { node_id, log_id } => {
                         self.handle_update_match_index(node_id, log_id).await?;
                     }
@@ -495,6 +476,22 @@ where
         self.handle_write_entry(EntryPayload::ConfigChange(ConfigChangeEntry { membership }), awaiting_joint_tx).await;
     }
 
+    async fn handle_joint_consensus(&mut self) {
+        println!("joint consensus");
+        let (awaiting_uniform_tx, awaiting_uniform_rx) = oneshot::channel();
+        self.awaiting_uniform.push_back(awaiting_uniform_rx);
+        let mut membership = self.node.membership.clone();
+        assert!(membership.members_after_consensus.is_some());
+        membership.members = membership.members_after_consensus.take().unwrap();
+        self.handle_write_entry(EntryPayload::ConfigChange(ConfigChangeEntry { membership }), awaiting_uniform_tx).await;
+    }
+
+    async fn handle_uniform_consensus(&mut self) {
+        println!("uniform consensus");
+        let tx = self.awaiting_config_change.take().unwrap();
+        _ = tx.send(Ok(()));
+    }
+
     async fn handle_write_entry(&mut self, entry: EntryPayload<D>, tx: oneshot::Sender<Result<R, Error>>) {
         let entry = match self.node.append_entry(entry).await {
             Ok(entry) => entry,
@@ -513,6 +510,7 @@ where
             let result = self.node.state_machine.apply_entries(entries).await.unwrap();
             self.node.last_applied_log_id = self.node.state_machine.get_applied_log_id().await.unwrap();
             self.node.membership = self.node.state_machine.get_membership_config().await.unwrap();
+            self.update_replication().await;
             let _ = tx.send(Ok(result.into_iter().next().unwrap()));
             return;
         }
@@ -573,14 +571,49 @@ where
         let entries = self.node.log_storage
             .read_entries(self.node.last_applied_log_id.index + 1, match_index + 1)
             .await?;
+        let update_membership = entries.iter().any(|entry| match entry.payload {
+            EntryPayload::ConfigChange(_) => true,
+            _ => false,
+        });
         self.node.state_machine.apply_entries(entries).await?;
         self.node.last_applied_log_id = self.node.state_machine.get_applied_log_id().await?;
-        self.node.membership = self.node.state_machine.get_membership_config().await?;
+        if update_membership {
+            self.node.membership = self.node.state_machine.get_membership_config().await?;
+            self.update_replication().await;
+        }
         for node in self.nodes.values() {
             let _ = node.tx.send(ReplicationMessage::Commit {
                 commit_index: self.node.last_applied_log_id.index,
             });
         }
         Ok(())
+    }
+
+    async fn update_replication(&mut self) {
+        let all_members = self.node.membership.all_members();
+        self.nodes.retain(|&id, _| all_members.contains(&id));
+        for target_id in all_members {
+            if target_id == self.node.id || self.nodes.contains_key(&target_id) {
+                continue;
+            }
+            let (tx, rx) = mpsc::unbounded_channel();
+            let handle = RaftReplication::spawn(
+                self.node.id,
+                target_id,
+                &self.node.config,
+                self.node.transport.clone(),
+                self.node.log_storage.clone(),
+                self.tx_replica.clone(),
+                rx,
+                self.node.current_term,
+                self.node.last_log_id.index,
+                self.node.last_applied_log_id.index,
+            );
+            self.nodes.insert(target_id, ReplicationNode {
+                tx,
+                handle,
+                match_log_id: LogId::default()
+            });
+        }
     }
 }
