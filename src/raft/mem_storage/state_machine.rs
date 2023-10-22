@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::raft::{
-    Data, Entry, EntryPayload, Error, HardState, LogId, MembershipConfig, Response,
-    StateMachine, ws_transport::NodeMetaStorage, NodeId,
+    ws_transport::NodeMetaStorage, Data, Entry, EntryPayload, Error, HardState, LogId,
+    MembershipConfig, NodeId, Response, StateMachine,
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -75,21 +75,15 @@ impl StateMachine<Action, ActionResponse> for MemStateMachine {
         for entry in entires.into_iter() {
             assert!(inner.applied_log_id.index < entry.log_id.index);
             let result = match entry.payload {
-                EntryPayload::Blank => {
-                    ActionResponse(None)
-                }
+                EntryPayload::Blank => ActionResponse(None),
                 EntryPayload::ConfigChange(config_change) => {
                     inner.membership = config_change.membership;
                     ActionResponse(None)
                 }
                 EntryPayload::Data(data) => match data.data {
-                    Action::Set { key, value } => {
-                        ActionResponse(inner.data.insert(key, value))
-                    }
-                    Action::Delete { key } => {
-                        ActionResponse(inner.data.remove(&key))
-                    }
-                }
+                    Action::Set { key, value } => ActionResponse(inner.data.insert(key, value)),
+                    Action::Delete { key } => ActionResponse(inner.data.remove(&key)),
+                },
             };
             resp.push(result);
             inner.applied_log_id = entry.log_id;

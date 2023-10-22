@@ -1,15 +1,19 @@
 use std::sync::Arc;
-use std::{net::SocketAddr, marker::PhantomData};
+use std::{marker::PhantomData, net::SocketAddr};
 
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, WebSocketStream, MaybeTlsStream};
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
-use crate::raft::{Raft, LogStorage, StateMachine, Data, AppendEntriesRequest, InstallSnapshotRequest, RequestVoteRequest, Transport, NodeId, Error, Connection, AppendEntriesResponse, InstallSnapshotResponse, RequestVoteResponse, Response};
+use crate::raft::{
+    AppendEntriesRequest, AppendEntriesResponse, Connection, Data, Error, InstallSnapshotRequest,
+    InstallSnapshotResponse, LogStorage, NodeId, Raft, RequestVoteRequest, RequestVoteResponse,
+    Response, StateMachine, Transport,
+};
 
 #[async_trait::async_trait]
 pub trait NodeMetaStorage<D>: Send + Sync + 'static {
@@ -41,15 +45,18 @@ impl<D: Data + Serialize> Connection<D> for WsConnection<D> {
         request: AppendEntriesRequest<D>,
     ) -> Result<AppendEntriesResponse, Error> {
         let message = WsMessage::AppendEntries(request);
-        self.tx.send(Message::binary(bincode::serialize(&message)?)).await?;
+        self.tx
+            .send(Message::binary(bincode::serialize(&message)?))
+            .await?;
         match self.rx.next().await {
-            Some(Ok(data)) => {
-                Ok(bincode::deserialize::<Result<AppendEntriesResponse, WsError>>(data.to_string().as_bytes())?.unwrap())
-            }
-            Some(Err(err)) => {
-                Err(err)?
-            }
-            None => Err("unexpected result")?
+            Some(Ok(data)) => Ok(
+                bincode::deserialize::<Result<AppendEntriesResponse, WsError>>(
+                    data.to_string().as_bytes(),
+                )?
+                .unwrap(),
+            ),
+            Some(Err(err)) => Err(err)?,
+            None => Err("unexpected result")?,
         }
     }
 
@@ -58,15 +65,18 @@ impl<D: Data + Serialize> Connection<D> for WsConnection<D> {
         request: InstallSnapshotRequest,
     ) -> Result<InstallSnapshotResponse, Error> {
         let message = WsMessage::<D>::InstallSnapshot(request);
-        self.tx.send(Message::binary(bincode::serialize(&message)?)).await?;
+        self.tx
+            .send(Message::binary(bincode::serialize(&message)?))
+            .await?;
         match self.rx.next().await {
-            Some(Ok(data)) => {
-                Ok(bincode::deserialize::<Result<InstallSnapshotResponse, WsError>>(data.to_string().as_bytes())?.unwrap())
-            }
-            Some(Err(err)) => {
-                Err(err)?
-            }
-            None => Err("unexpected result")?
+            Some(Ok(data)) => Ok(
+                bincode::deserialize::<Result<InstallSnapshotResponse, WsError>>(
+                    data.to_string().as_bytes(),
+                )?
+                .unwrap(),
+            ),
+            Some(Err(err)) => Err(err)?,
+            None => Err("unexpected result")?,
         }
     }
 
@@ -75,15 +85,18 @@ impl<D: Data + Serialize> Connection<D> for WsConnection<D> {
         request: RequestVoteRequest,
     ) -> Result<RequestVoteResponse, Error> {
         let message = WsMessage::<D>::RequestVote(request);
-        self.tx.send(Message::binary(bincode::serialize(&message)?)).await?;
+        self.tx
+            .send(Message::binary(bincode::serialize(&message)?))
+            .await?;
         match self.rx.next().await {
-            Some(Ok(data)) => {
-                Ok(bincode::deserialize::<Result<RequestVoteResponse, WsError>>(data.to_string().as_bytes())?.unwrap())
-            }
-            Some(Err(err)) => {
-                Err(err)?
-            }
-            None => Err("unexpected result")?
+            Some(Ok(data)) => Ok(
+                bincode::deserialize::<Result<RequestVoteResponse, WsError>>(
+                    data.to_string().as_bytes(),
+                )?
+                .unwrap(),
+            ),
+            Some(Err(err)) => Err(err)?,
+            None => Err("unexpected result")?,
         }
     }
 }

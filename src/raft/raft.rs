@@ -4,9 +4,9 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 
 use super::{
-    AppendEntriesRequest, AppendEntriesResponse, Config, Data, Error, InstallSnapshotRequest,
-    InstallSnapshotResponse, LogStorage, Message, NodeId, RaftNode, RequestVoteRequest,
-    RequestVoteResponse, Response, StateMachine, Transport, EntryPayload, DataEntry,
+    AppendEntriesRequest, AppendEntriesResponse, Config, Data, DataEntry, EntryPayload, Error,
+    InstallSnapshotRequest, InstallSnapshotResponse, LogStorage, Message, NodeId, RaftNode,
+    RequestVoteRequest, RequestVoteResponse, Response, StateMachine, Transport,
 };
 
 pub struct Raft<D, R, TR, LS, SM>
@@ -20,11 +20,7 @@ where
     tx: mpsc::UnboundedSender<Message<D, R>>,
     tx_shutdown: Mutex<Option<oneshot::Sender<()>>>,
     handle: Mutex<Option<JoinHandle<Result<(), Error>>>>,
-    _phantom: (
-        PhantomData<TR>,
-        PhantomData<LS>,
-        PhantomData<SM>,
-    ),
+    _phantom: (PhantomData<TR>, PhantomData<LS>, PhantomData<SM>),
 }
 
 impl<D, R, TR, LS, SM> Raft<D, R, TR, LS, SM>
@@ -58,11 +54,7 @@ where
             tx,
             tx_shutdown: Mutex::new(Some(tx_shutdown)),
             handle: Mutex::new(Some(handle)),
-            _phantom: (
-                PhantomData,
-                PhantomData,
-                PhantomData,
-            ),
+            _phantom: (PhantomData, PhantomData, PhantomData),
         })
     }
 
@@ -112,8 +104,8 @@ where
 
     pub async fn write_data(&self, data: D) -> Result<R, Error> {
         let (tx, rx) = oneshot::channel();
-        let message = Message::WriteEntry { 
-            entry: EntryPayload::Data(DataEntry { data }), 
+        let message = Message::WriteEntry {
+            entry: EntryPayload::Data(DataEntry { data }),
             tx,
         };
         self.tx.send(message)?;

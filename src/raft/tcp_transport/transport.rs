@@ -11,8 +11,8 @@ use tokio::task::JoinHandle;
 use crate::raft::ws_transport::NodeMetaStorage;
 use crate::raft::{
     AppendEntriesRequest, AppendEntriesResponse, Connection, Data, Error, InstallSnapshotRequest,
-    InstallSnapshotResponse, LogStorage, NodeId, Raft, RequestVoteRequest,
-    RequestVoteResponse, Response, StateMachine, Transport,
+    InstallSnapshotResponse, LogStorage, NodeId, Raft, RequestVoteRequest, RequestVoteResponse,
+    Response, StateMachine, Transport,
 };
 
 pub struct TcpConnection<D: Data> {

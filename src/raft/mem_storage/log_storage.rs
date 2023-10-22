@@ -1,8 +1,8 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
 
 use tokio::sync::RwLock;
 
-use crate::raft::{Data, Entry, Error, LogState, LogStorage, LogId};
+use crate::raft::{Data, Entry, Error, LogId, LogState, LogStorage};
 
 struct MemLogStorageInner<D: Data> {
     logs: BTreeMap<u64, Entry<D>>,

@@ -5,7 +5,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep_until, Instant};
 
-use super::{Connection, NodeId, Error, Config, Transport, Data, LogId, LogStorage, AppendEntriesRequest, Entry};
+use super::{
+    AppendEntriesRequest, Config, Connection, Data, Entry, Error, LogId, LogStorage, NodeId,
+    Transport,
+};
 
 pub(super) enum ReplicationMessage<D: Data> {
     Replicate {
@@ -19,14 +22,8 @@ pub(super) enum ReplicationMessage<D: Data> {
 }
 
 pub(super) enum ReplicationEvent {
-    UpdateMatchIndex {
-        node_id: NodeId,
-        log_id: LogId,
-    },
-    RevertToFollower {
-        node_id: NodeId,
-        term: u64,
-    }
+    UpdateMatchIndex { node_id: NodeId, log_id: LogId },
+    RevertToFollower { node_id: NodeId, term: u64 },
 }
 
 pub(super) enum ReplicationState {
@@ -85,7 +82,10 @@ where
             last_log_index,
             commit_index,
             heartbeat_timeout: config.heartbeat_timeout,
-            prev_log_id: LogId { index: last_log_index, term: current_term },
+            prev_log_id: LogId {
+                index: last_log_index,
+                term: current_term,
+            },
         };
         tokio::spawn(this.run())
     }
@@ -93,8 +93,8 @@ where
     async fn run(mut self) -> Result<(), Error> {
         loop {
             match &self.target_state {
-                ReplicationState::Normal => self.run_normal().await?,
-                ReplicationState::Snapshot => self.run_snapshot().await?,
+                ReplicationState::Normal => self.run_normal().await.unwrap(),
+                ReplicationState::Snapshot => self.run_snapshot().await.unwrap(),
                 ReplicationState::Shutdown => return Ok(()),
             }
         }
@@ -156,7 +156,10 @@ where
     }
 
     async fn replicate_append_entries(&mut self) -> Result<(), Error> {
-        let entries = self.log_storage.read_entries(self.prev_log_id.index + 1, self.last_log_index + 1).await?;
+        let entries = self
+            .log_storage
+            .read_entries(self.prev_log_id.index + 1, self.last_log_index + 1)
+            .await?;
         println!("replicate entries: {}", entries.len());
         let request = AppendEntriesRequest {
             term: self.current_term,
