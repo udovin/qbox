@@ -34,6 +34,7 @@ where
     pub fn new(
         id: NodeId,
         config: Config,
+        logger: slog::Logger,
         transport: Arc<TR>,
         log_storage: Arc<LS>,
         state_machine: Arc<SM>,
@@ -44,6 +45,7 @@ where
         let handle = RaftNode::<D, R, TR, LS, SM>::spawn(
             id,
             config,
+            logger,
             transport,
             log_storage,
             state_machine,

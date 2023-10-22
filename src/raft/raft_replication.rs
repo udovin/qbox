@@ -40,6 +40,7 @@ where
 {
     leader_id: NodeId,
     target_id: NodeId,
+    logger: slog::Logger,
     transport: Arc<TR>,
     log_storage: Arc<LS>,
     tx: mpsc::UnboundedSender<ReplicationEvent>,
@@ -62,6 +63,7 @@ where
         leader_id: NodeId,
         target_id: NodeId,
         config: &Config,
+        logger: slog::Logger,
         transport: Arc<TR>,
         log_storage: Arc<LS>,
         tx: mpsc::UnboundedSender<ReplicationEvent>,
@@ -73,6 +75,7 @@ where
         let this = Self {
             leader_id,
             target_id,
+            logger,
             transport,
             log_storage,
             tx,
@@ -160,7 +163,7 @@ where
             .log_storage
             .read_entries(self.prev_log_id.index + 1, self.last_log_index + 1)
             .await?;
-        println!("replicate entries: {}", entries.len());
+        slog::debug!(self.logger, "Replicate entries"; slog::o!("count" => entries.len(), "target_id" => self.target_id));
         let request = AppendEntriesRequest {
             term: self.current_term,
             leader_id: self.leader_id,

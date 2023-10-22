@@ -5,6 +5,7 @@ use qbox::raft::{Config, Data, LogStorage, NodeId, Raft, Response, StateMachine,
 use rand::{thread_rng, Rng};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use slog::Drain;
 use std::convert::Infallible;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
@@ -103,6 +104,14 @@ where
 }
 
 async fn async_server_main(args: ServerArgs) {
+    let decorator = slog_term::TermDecorator::new().build();
+    let drain = slog_term::FullFormat::new(decorator).build().fuse();
+    let drain = slog_async::Async::new(drain)
+        .chan_size(4096)
+        .overflow_strategy(slog_async::OverflowStrategy::Block)
+        .build()
+        .fuse();
+    let logger = slog::Logger::root(drain, slog::o!());
     let config = Config::default();
     let log_storage = Arc::new(MemLogStorage::new());
     let state_machine = Arc::new(MemStateMachine::new());
@@ -111,6 +120,7 @@ async fn async_server_main(args: ServerArgs) {
     let raft = Raft::new(
         node_id,
         config,
+        logger.clone(),
         transport,
         log_storage,
         state_machine.clone(),
@@ -134,9 +144,9 @@ async fn async_server_main(args: ServerArgs) {
     };
     let routes = raft_route.or(raft_add_node_route);
     let server = warp::serve(routes).run(args.addr);
-    println!("Node with id {}", node_id);
+    slog::info!(logger, "Initiaizing node"; slog::o!("id" => node_id));
     if let Some(addr) = args.join {
-        println!("Joining cluster");
+        slog::info!(logger, "Joining cluster");
         let client = reqwest::Client::new();
         let _ = client
             .post(format!("http://{}/raft/add-node", addr))
@@ -147,18 +157,16 @@ async fn async_server_main(args: ServerArgs) {
             .send()
             .await
             .unwrap();
-
-        println!("Joined cluster");
+        slog::info!(logger, "Cluster joined");
     } else if args.init {
-        println!("Initializing cluster");
+        slog::info!(logger, "Initiaizing cluster");
         raft.init_cluster().await.unwrap();
         let node = Action::Set {
             key: format!("nodes/{}", node_id),
             value: args.addr.to_string(),
         };
-        println!("Writing node meta");
         raft.write_data(node).await.unwrap();
-        println!("Initialization completed!");
+        slog::info!(logger, "Cluster initialized");
     }
     tokio::select! {
         _ = server => {}

@@ -36,6 +36,7 @@ where
 {
     id: NodeId,
     config: Config,
+    logger: slog::Logger,
     transport: Arc<TR>,
     log_storage: Arc<LS>,
     state_machine: Arc<SM>,
@@ -63,6 +64,7 @@ where
     pub(super) fn spawn(
         id: NodeId,
         config: Config,
+        logger: slog::Logger,
         transport: Arc<TR>,
         log_storage: Arc<LS>,
         state_machine: Arc<SM>,
@@ -72,6 +74,7 @@ where
         let this = Self {
             id,
             config,
+            logger,
             transport,
             log_storage,
             state_machine,
@@ -663,6 +666,7 @@ where
                 self.node.id,
                 target_id,
                 &self.node.config,
+                self.node.logger.clone(),
                 self.node.transport.clone(),
                 self.node.log_storage.clone(),
                 self.tx_replica.clone(),
