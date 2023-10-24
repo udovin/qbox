@@ -2,7 +2,7 @@ mod config;
 mod message;
 mod raft;
 mod raft_node;
-mod raft_replication;
+mod replication;
 mod storage;
 mod transport;
 mod types;
@@ -19,4 +19,4 @@ pub use transport::*;
 pub use types::*;
 
 use raft_node::*;
-use raft_replication::*;
+use replication::*;

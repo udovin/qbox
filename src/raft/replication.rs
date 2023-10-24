@@ -26,13 +26,13 @@ pub(super) enum ReplicationEvent {
     RevertToFollower { node_id: NodeId, term: u64 },
 }
 
-pub(super) enum ReplicationState {
+pub enum ReplicationState {
     Normal,
     Snapshot,
     Shutdown,
 }
 
-pub(super) struct RaftReplication<D, TR, LS>
+pub(super) struct Replication<D, TR, LS>
 where
     D: Data,
     TR: Transport<D>,
@@ -53,7 +53,7 @@ where
     prev_log_id: LogId,
 }
 
-impl<D, TR, LS> RaftReplication<D, TR, LS>
+impl<D, TR, LS> Replication<D, TR, LS>
 where
     D: Data,
     TR: Transport<D>,

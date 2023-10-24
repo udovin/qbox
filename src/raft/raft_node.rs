@@ -10,11 +10,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::sleep_until;
 
-use super::raft_replication::{ReplicationEvent, ReplicationMessage};
+use super::replication::{ReplicationEvent, ReplicationMessage};
 use super::{
     AppendEntriesRequest, AppendEntriesResponse, Config, ConfigChangeEntry, Data, Entry,
     EntryPayload, Error, HardState, InstallSnapshotRequest, InstallSnapshotResponse, LogId,
-    LogStorage, MembershipConfig, Message, NodeId, RaftReplication, RequestVoteRequest,
+    LogStorage, MembershipConfig, Message, NodeId, Replication, RequestVoteRequest,
     RequestVoteResponse, Response, StateMachine, Transport,
 };
 
@@ -419,7 +419,7 @@ where
         self.node.last_heartbeat = None;
         self.node.current_leader = Some(self.node.id);
         self.commit_initial_leader_entry().await?;
-        self.update_replication().await;
+        self.update_replication().await?;
         loop {
             if !matches!(self.node.target_state, State::Leader) {
                 return Ok(());
@@ -568,7 +568,7 @@ where
                 .get_membership_config()
                 .await
                 .unwrap();
-            self.update_replication().await;
+            self.update_replication().await.unwrap();
             let _ = tx.send(Ok(result.into_iter().next().unwrap()));
             return;
         }
@@ -644,7 +644,7 @@ where
         self.node.last_applied_log_id = self.node.state_machine.get_applied_log_id().await?;
         if update_membership {
             self.node.membership = self.node.state_machine.get_membership_config().await?;
-            self.update_replication().await;
+            self.update_replication().await?;
         }
         for node in self.nodes.values() {
             let _ = node.tx.send(ReplicationMessage::Commit {
@@ -654,35 +654,60 @@ where
         Ok(())
     }
 
-    async fn update_replication(&mut self) {
+    async fn update_replication(&mut self) -> Result<(), Error> {
         let all_members = self.node.membership.all_members();
-        self.nodes.retain(|&id, _| all_members.contains(&id));
-        for target_id in all_members {
-            if target_id == self.node.id || self.nodes.contains_key(&target_id) {
-                continue;
-            }
-            let (tx, rx) = mpsc::unbounded_channel();
-            let handle = RaftReplication::spawn(
-                self.node.id,
-                target_id,
-                &self.node.config,
-                self.node.logger.clone(),
-                self.node.transport.clone(),
-                self.node.log_storage.clone(),
-                self.tx_replica.clone(),
-                rx,
-                self.node.current_term,
-                self.node.last_log_id.index,
-                self.node.last_applied_log_id.index,
-            );
-            self.nodes.insert(
-                target_id,
-                ReplicationNode {
-                    tx,
-                    handle,
-                    match_log_id: LogId::default(),
-                },
-            );
+        let remove_ids: Vec<_> = self
+            .nodes
+            .iter()
+            .filter(|(id, _)| !all_members.contains(id))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in remove_ids {
+            self.stop_replication(id).await?;
         }
+        for id in all_members {
+            if id != self.node.id && !self.nodes.contains_key(&id) {
+                self.start_replication(id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn start_replication(&mut self, id: u64) -> Result<(), Error> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = Replication::spawn(
+            self.node.id,
+            id,
+            &self.node.config,
+            self.node.logger.clone(),
+            self.node.transport.clone(),
+            self.node.log_storage.clone(),
+            self.tx_replica.clone(),
+            rx,
+            self.node.current_term,
+            self.node.last_log_id.index,
+            self.node.last_applied_log_id.index,
+        );
+        if let Some(_) = self.nodes.insert(
+            id,
+            ReplicationNode {
+                tx,
+                handle,
+                match_log_id: LogId::default(),
+            },
+        ) {
+            unreachable!();
+        }
+        Ok(())
+    }
+
+    async fn stop_replication(&mut self, id: u64) -> Result<(), Error> {
+        let node = match self.nodes.remove(&id) {
+            Some(node) => node,
+            None => unreachable!(),
+        };
+        node.tx.send(ReplicationMessage::Terminate)?;
+        node.handle.await??;
+        Ok(())
     }
 }
