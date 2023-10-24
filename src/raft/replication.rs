@@ -86,10 +86,7 @@ where
             last_log_index,
             commit_index,
             heartbeat_timeout: config.heartbeat_timeout,
-            prev_log_id: LogId {
-                index: last_log_index,
-                term: current_term,
-            },
+            prev_log_id: LogId::default(),
             connection: None,
         };
         tokio::spawn(this.run())
@@ -98,8 +95,8 @@ where
     async fn run(mut self) -> Result<(), Error> {
         loop {
             match &self.target_state {
-                ReplicationState::Normal => self.run_normal().await.unwrap(),
-                ReplicationState::Snapshot => self.run_snapshot().await.unwrap(),
+                ReplicationState::Normal => _ = self.run_normal().await,
+                ReplicationState::Snapshot => _ = self.run_snapshot().await,
                 ReplicationState::Shutdown => return Ok(()),
             }
         }
@@ -172,15 +169,6 @@ where
             .log_storage
             .read_entries(self.prev_log_id.index + 1, self.last_log_index + 1)
             .await?;
-        slog::debug!(
-            self.logger, "Replicate entries";
-            slog::o!(
-                "count" => entries.len(),
-                "target_id" => self.target_id,
-                "prev_log_index" => self.prev_log_id.index,
-                "prev_log_term" => self.prev_log_id.term,
-            )
-        );
         let request = AppendEntriesRequest {
             term: self.current_term,
             leader_id: self.leader_id,
@@ -189,6 +177,16 @@ where
             entries,
         };
         let mut connection = self.take_connection().await?;
+        if !request.entries.is_empty() {
+            slog::debug!(
+                self.logger, "Replicate entries";
+                slog::o!(
+                    "count" => request.entries.len(),
+                    "prev_log_index" => self.prev_log_id.index,
+                    "prev_log_term" => self.prev_log_id.term,
+                )
+            );
+        }
         let response = match connection.append_entries(request).await {
             Err(err) => return Err(err),
             Ok(response) => response,

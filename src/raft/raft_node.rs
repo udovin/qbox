@@ -240,6 +240,7 @@ where
         request: AppendEntriesRequest<D>,
     ) -> Result<AppendEntriesResponse, Error> {
         if request.term < self.current_term {
+            slog::debug!(self.logger, "Request term is old");
             return Ok(AppendEntriesResponse {
                 term: self.current_term,
                 success: false,
@@ -260,12 +261,14 @@ where
             self.target_state = State::Follower;
         }
         if request.prev_log_id.index > self.last_log_id.index {
+            slog::debug!(self.logger, "Prev log id is too new");
             return Ok(AppendEntriesResponse {
                 term: self.current_term,
                 success: false,
             });
         }
         if request.prev_log_id != self.last_log_id {
+            slog::debug!(self.logger, "Inconsistent prev_log_id"; slog::o!("last_log_id" => self.last_log_id.index));
             match self
                 .log_storage
                 .read_entries(request.prev_log_id.index, request.prev_log_id.index + 1)
@@ -385,7 +388,7 @@ where
     node: &'a mut RaftNode<D, R, TR, LS, SM>,
     nodes: HashMap<NodeId, ReplicationNode<D>>,
     consensus_state: ConsensusState,
-    awaiting_data: Vec<(u64, oneshot::Sender<Result<R, Error>>)>,
+    awaiting_commit: Vec<(u64, oneshot::Sender<Result<R, Error>>)>,
     awaiting_config_change: Option<oneshot::Sender<Result<(), Error>>>,
     awaiting_consensus_change: FuturesOrdered<oneshot::Receiver<Result<R, Error>>>,
     tx_replica: mpsc::UnboundedSender<ReplicationEvent>,
@@ -406,7 +409,7 @@ where
             node,
             nodes: HashMap::new(),
             consensus_state: ConsensusState::Uniform,
-            awaiting_data: Vec::default(),
+            awaiting_commit: Vec::default(),
             awaiting_config_change: None,
             awaiting_consensus_change: FuturesOrdered::default(),
             tx_replica,
@@ -486,7 +489,6 @@ where
             let _ = tx.send(Err("cluster is not in uniform consensus".into()));
             return;
         }
-        dbg!(self.consensus_state.clone());
         self.awaiting_config_change = Some(tx);
         let (tx, rx) = oneshot::channel();
         self.awaiting_consensus_change.push_back(rx);
@@ -499,10 +501,10 @@ where
         )
         .await;
         self.consensus_state = ConsensusState::Joint;
+        slog::debug!(self.node.logger, "Change consensus state"; slog::o!("state" => "joint"));
     }
 
     async fn handle_consensus_change(&mut self) {
-        dbg!(self.consensus_state.clone());
         match self.consensus_state {
             ConsensusState::Joint => {
                 let mut membership = self.node.membership.clone();
@@ -520,6 +522,7 @@ where
                 )
                 .await;
                 self.consensus_state = ConsensusState::JointCommitted;
+                slog::debug!(self.node.logger, "Change consensus state"; slog::o!("state" => "joint committed"));
             }
             ConsensusState::JointCommitted => {
                 assert!(self.node.membership.members_after_consensus.is_none());
@@ -527,6 +530,7 @@ where
                 if let Some(tx) = self.awaiting_config_change.take() {
                     let _ = tx.send(Ok(()));
                 }
+                slog::debug!(self.node.logger, "Change consensus state"; slog::o!("state" => "uniform"));
             }
             ConsensusState::Uniform => unreachable!(),
         }
@@ -572,7 +576,7 @@ where
             let _ = tx.send(Ok(result.into_iter().next().unwrap()));
             return;
         }
-        self.awaiting_data.push((entry.log_id.index, tx));
+        self.awaiting_commit.push((entry.log_id.index, tx));
         let entry = Arc::new(entry);
         for node in self.nodes.values() {
             let _ = node.tx.send(ReplicationMessage::Replicate {
@@ -631,6 +635,7 @@ where
         if match_index <= self.node.last_applied_log_id.index {
             return Ok(());
         }
+        slog::debug!(self.node.logger, "Match index"; slog::o!("match_index" => match_index));
         let entries = self
             .node
             .log_storage
@@ -640,7 +645,24 @@ where
             EntryPayload::ConfigChange(_) => true,
             _ => false,
         });
-        self.node.state_machine.apply_entries(entries).await?;
+        let indexes: Vec<_> = entries.iter().map(|entry| entry.log_id.index).collect();
+        let results = self.node.state_machine.apply_entries(entries).await?;
+        assert!(results.len() == indexes.len());
+        if let Some(index) = indexes.last() {
+            let pos = self.awaiting_commit.partition_point(|(id, _)| id <= &index);
+            let mut it = 0usize;
+            for (id, tx) in self.awaiting_commit.drain(..pos) {
+                while it < results.len() && indexes[it] < id {
+                    it += 1
+                }
+                if indexes[it] == id {
+                    let _ = tx.send(Ok(results[it].clone()));
+                    it += 1
+                } else {
+                    unreachable!();
+                }
+            }
+        }
         self.node.last_applied_log_id = self.node.state_machine.get_applied_log_id().await?;
         if update_membership {
             self.node.membership = self.node.state_machine.get_membership_config().await?;
@@ -679,7 +701,7 @@ where
             self.node.id,
             id,
             &self.node.config,
-            self.node.logger.clone(),
+            self.node.logger.new(slog::o!("target_id" => id)),
             self.node.transport.clone(),
             self.node.log_storage.clone(),
             self.tx_replica.clone(),
