@@ -121,7 +121,7 @@ where
 
     async fn connect(&self, id: NodeId) -> Result<WsConnection<D>, Error> {
         let node = self.storage.get_node_meta(id).await?;
-        let response = connect_async(format!("http://{}/raft", node)).await?;
+        let response = connect_async(format!("ws://{}/raft", node)).await?;
         let stream = response.0;
         let (tx, rx) = stream.split();
         Ok(WsConnection {

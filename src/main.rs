@@ -148,8 +148,22 @@ async fn async_server_main(args: ServerArgs) {
             .and(warp::any().map(move || raft.clone()))
             .and_then(raft_add_node_handle)
     };
-    let routes = raft_route.or(raft_add_node_route);
-    let server = warp::serve(routes).run(args.addr);
+    let log = {
+        let logger = logger.clone();
+        warp::log::custom(move |info| {
+            slog::info!(
+                logger, "Reqeust";
+                slog::o!(
+                    "path" => info.path(),
+                    "status" => info.status().as_str(),
+                ),
+            );
+        })
+    };
+    let routes = raft_route
+        .or(raft_add_node_route)
+        .with(log);
+    let server = tokio::spawn(warp::serve(routes).run(args.addr));
     slog::info!(logger, "Initiaizing node");
     if let Some(addr) = args.join {
         slog::info!(logger, "Joining cluster");

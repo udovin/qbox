@@ -51,6 +51,7 @@ where
     commit_index: u64,
     heartbeat_timeout: Duration,
     prev_log_id: LogId,
+    connection: Option<TR::Connection>,
 }
 
 impl<D, TR, LS> Replication<D, TR, LS>
@@ -89,6 +90,7 @@ where
                 index: last_log_index,
                 term: current_term,
             },
+            connection: None,
         };
         tokio::spawn(this.run())
     }
@@ -158,12 +160,27 @@ where
         }
     }
 
+    async fn take_connection(&mut self) -> Result<TR::Connection, Error> {
+        if let Some(connection) = self.connection.take() {
+            return Ok(connection);
+        }
+        self.transport.connect(self.target_id).await
+    }
+
     async fn replicate_append_entries(&mut self) -> Result<(), Error> {
         let entries = self
             .log_storage
             .read_entries(self.prev_log_id.index + 1, self.last_log_index + 1)
             .await?;
-        slog::debug!(self.logger, "Replicate entries"; slog::o!("count" => entries.len(), "target_id" => self.target_id));
+        slog::debug!(
+            self.logger, "Replicate entries";
+            slog::o!(
+                "count" => entries.len(),
+                "target_id" => self.target_id,
+                "prev_log_index" => self.prev_log_id.index,
+                "prev_log_term" => self.prev_log_id.term,
+            )
+        );
         let request = AppendEntriesRequest {
             term: self.current_term,
             leader_id: self.leader_id,
@@ -171,11 +188,12 @@ where
             leader_commit: self.commit_index,
             entries,
         };
-        let mut connection = self.transport.connect(self.target_id).await?;
+        let mut connection = self.take_connection().await?;
         let response = match connection.append_entries(request).await {
             Err(err) => return Err(err),
             Ok(response) => response,
         };
+        self.connection = Some(connection);
         if response.term > self.current_term {
             self.tx.send(ReplicationEvent::RevertToFollower {
                 node_id: self.target_id,
