@@ -203,7 +203,8 @@ where
                 if contains_log_id(self.log_storage.as_ref(), conflict_opt).await? {
                     self.prev_log_id = conflict_opt;
                 } else {
-                    unimplemented!();
+                    // Enter snapshot state.
+                    self.target_state = ReplicationState::Snapshot;
                 }
             }
             return Ok(());

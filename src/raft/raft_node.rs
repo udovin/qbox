@@ -9,7 +9,6 @@ use futures_util::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::sleep_until;
-use warp::filters::log;
 
 use super::replication::{ReplicationEvent, ReplicationMessage};
 use super::{
@@ -306,7 +305,7 @@ where
                 .log_storage
                 .read_entries(self.last_applied_log_id.index + 1, leader_commit + 1)
                 .await?;
-            let update_membership = need_update_membership(&entries);
+            let update_membership = has_config_change(&entries);
             self.state_machine.apply_entries(entries).await?;
             self.last_applied_log_id = self.state_machine.get_applied_log_id().await?;
             assert!(self.last_applied_log_id.index == leader_commit);
@@ -330,7 +329,51 @@ where
         &mut self,
         request: RequestVoteRequest,
     ) -> Result<RequestVoteResponse, Error> {
-        todo!()
+        if request.term < self.current_term {
+            return Ok(RequestVoteResponse {
+                term: self.current_term,
+                vote_granted: false,
+            });
+        }
+        let now = Instant::now();
+        if request.term != self.current_term {
+            if matches!(self.target_state, State::Leader | State::Candidate) {
+                slog::info!(self.logger, "Switch to follower state");
+                self.target_state = State::Follower;
+            }
+            self.next_election_timeout = Some(now + self.config.new_rand_election_timeout());
+            self.current_term = request.term;
+            self.voted_for = None;
+            self.save_hard_state().await?;
+        }
+        if request.last_log_id.term < self.last_log_id.term
+            || request.last_log_id.index < self.last_log_id.index
+        {
+            return Ok(RequestVoteResponse {
+                term: self.current_term,
+                vote_granted: false,
+            });
+        }
+        match &self.voted_for {
+            Some(candidate_id) => Ok(RequestVoteResponse {
+                term: self.current_term,
+                vote_granted: candidate_id == &request.candidate_id,
+            }),
+            None => {
+                if matches!(self.target_state, State::Leader | State::Candidate) {
+                    slog::info!(self.logger, "Switch to follower state");
+                    self.target_state = State::Follower;
+                }
+                self.next_election_timeout = Some(now + self.config.new_rand_election_timeout());
+                self.current_term = request.term;
+                self.voted_for = Some(request.candidate_id);
+                self.save_hard_state().await?;
+                Ok(RequestVoteResponse {
+                    term: self.current_term,
+                    vote_granted: true,
+                })
+            }
+        }
     }
 
     async fn handle_install_snapshot(
@@ -615,14 +658,11 @@ where
         if term < self.node.current_term {
             Err("cannot revert to follower with lower term")?
         }
+        slog::info!(self.node.logger, "Switch to follower state");
+        self.node.target_state = State::Follower;
         self.node.current_term = term;
         self.node.voted_for = None;
         self.node.save_hard_state().await?;
-        if self.node.membership.all_members().contains(&self.node.id) {
-            self.node.target_state = State::Follower;
-        } else {
-            self.node.target_state = State::NonVoter;
-        }
         Ok(())
     }
 
@@ -661,7 +701,7 @@ where
             .log_storage
             .read_entries(self.node.last_applied_log_id.index + 1, commit_index + 1)
             .await?;
-        let update_membership = need_update_membership(&entries);
+        let update_membership = has_config_change(&entries);
         let indexes: Vec<_> = entries.iter().map(|entry| entry.log_id.index).collect();
         let results = self.node.state_machine.apply_entries(entries).await?;
         assert!(results.len() == indexes.len());
@@ -765,7 +805,7 @@ where
     }
 }
 
-fn need_update_membership<D: Data>(entries: &Vec<Entry<D>>) -> bool {
+fn has_config_change<D: Data>(entries: &Vec<Entry<D>>) -> bool {
     entries.iter().any(|entry| match entry.payload {
         EntryPayload::ConfigChange(_) => true,
         _ => false,
