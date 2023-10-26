@@ -199,6 +199,13 @@ where
             })?;
         }
         if !response.success {
+            if let Some(conflict_opt) = response.conflict_opt {
+                if contains_log_id(self.log_storage.as_ref(), conflict_opt).await? {
+                    self.prev_log_id = conflict_opt;
+                } else {
+                    unimplemented!();
+                }
+            }
             return Ok(());
         }
         self.prev_log_id.index = self.last_log_index;
@@ -208,5 +215,32 @@ where
             log_id: self.prev_log_id,
         })?;
         Ok(())
+    }
+}
+
+async fn contains_log_id<LS: LogStorage<D>, D: Data>(
+    log_storage: &LS,
+    log_id: LogId,
+) -> Result<bool, Error> {
+    let state = log_storage.get_log_state().await?;
+    if log_id.index < state.last_purged_log_id.index {
+        return Ok(false);
+    }
+    if log_id.index == state.last_purged_log_id.index {
+        return Ok(log_id.term == state.last_purged_log_id.term);
+    }
+    if log_id.index > state.last_log_id.index {
+        return Ok(false);
+    }
+    if log_id.index == state.last_log_id.index {
+        return Ok(log_id.term == state.last_log_id.term);
+    }
+    match log_storage
+        .read_entries(log_id.index, log_id.index + 1)
+        .await?
+        .first()
+    {
+        Some(entry) => Ok(entry.log_id.term == log_id.term),
+        None => Ok(false),
     }
 }

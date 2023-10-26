@@ -47,6 +47,7 @@ pub struct AppendEntriesRequest<D: Data> {
 pub struct AppendEntriesResponse {
     pub term: u64,
     pub success: bool,
+    pub conflict_opt: Option<LogId>,
 }
 
 #[derive(Serialize, Deserialize)]

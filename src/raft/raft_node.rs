@@ -9,6 +9,7 @@ use futures_util::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::sleep_until;
+use warp::filters::log;
 
 use super::replication::{ReplicationEvent, ReplicationMessage};
 use super::{
@@ -119,7 +120,7 @@ where
         }
         loop {
             match &self.target_state {
-                State::Leader => RaftLeader::new(&mut self).run().await?,
+                State::Leader => LeaderState::new(&mut self).run().await?,
                 State::Candidate => self.run_candidate().await?,
                 State::Follower => self.run_follower().await?,
                 State::NonVoter => self.run_non_voter().await?,
@@ -129,6 +130,7 @@ where
     }
 
     async fn run_candidate(&mut self) -> Result<(), Error> {
+        slog::info!(self.logger, "Enter candidate state"; slog::o!("term" => self.current_term));
         let now = Instant::now();
         self.next_election_timeout = Some(now + self.config.new_rand_election_timeout());
         loop {
@@ -166,6 +168,7 @@ where
     }
 
     async fn run_follower(&mut self) -> Result<(), Error> {
+        slog::info!(self.logger, "Enter follower state"; slog::o!("term" => self.current_term));
         let now = Instant::now();
         self.next_election_timeout = Some(now + self.config.new_rand_election_timeout());
         loop {
@@ -203,6 +206,7 @@ where
     }
 
     async fn run_non_voter(&mut self) -> Result<(), Error> {
+        slog::info!(self.logger, "Enter non voter state"; slog::o!("term" => self.current_term));
         loop {
             if !matches!(self.target_state, State::NonVoter) {
                 return Ok(());
@@ -240,10 +244,15 @@ where
         request: AppendEntriesRequest<D>,
     ) -> Result<AppendEntriesResponse, Error> {
         if request.term < self.current_term {
-            slog::debug!(self.logger, "Request term is old");
+            slog::debug!(
+                self.logger,
+                "Rejected append entries request with old term";
+                slog::o!("request_term" => request.term)
+            );
             return Ok(AppendEntriesResponse {
                 term: self.current_term,
                 success: false,
+                conflict_opt: None,
             });
         }
         let now = Instant::now();
@@ -258,58 +267,62 @@ where
             self.current_leader = Some(request.leader_id);
         }
         if matches!(self.target_state, State::Leader | State::Candidate) {
+            slog::info!(self.logger, "Switch to follower state");
             self.target_state = State::Follower;
         }
-        if request.prev_log_id.index > self.last_log_id.index {
-            slog::debug!(self.logger, "Prev log id is too new");
-            return Ok(AppendEntriesResponse {
-                term: self.current_term,
-                success: false,
-            });
-        }
         if request.prev_log_id != self.last_log_id {
-            slog::debug!(self.logger, "Inconsistent prev_log_id"; slog::o!("last_log_id" => self.last_log_id.index));
-            match self
+            let entries = self
                 .log_storage
                 .read_entries(request.prev_log_id.index, request.prev_log_id.index + 1)
-                .await?
-                .first()
-            {
-                Some(prev_entry) => {
-                    if prev_entry.log_id != request.prev_log_id {
-                        return Ok(AppendEntriesResponse {
-                            term: self.current_term,
-                            success: false,
-                        });
-                    }
-                    self.log_storage
-                        .truncate(request.prev_log_id.index + 1)
-                        .await?;
-                }
+                .await?;
+            let entry = match entries.first() {
+                Some(entry) => entry,
                 None => {
                     return Ok(AppendEntriesResponse {
                         term: self.current_term,
                         success: false,
-                    })
+                        conflict_opt: Some(self.last_log_id),
+                    });
                 }
             };
+            if entry.log_id.term != request.prev_log_id.term {
+                return Ok(AppendEntriesResponse {
+                    term: self.current_term,
+                    success: false,
+                    conflict_opt: Some(self.last_log_id),
+                });
+            }
+            assert!(self.last_applied_log_id.index <= request.prev_log_id.index);
+            self.log_storage
+                .truncate(request.prev_log_id.index + 1)
+                .await?;
         }
         self.log_storage.append_entries(request.entries).await?;
         self.last_log_id = self.log_storage.get_log_state().await?.last_log_id;
         let leader_commit = min(request.leader_commit, self.last_log_id.index);
+        assert!(self.last_applied_log_id.index <= leader_commit);
         if self.last_applied_log_id.index < leader_commit {
             let entries = self
                 .log_storage
                 .read_entries(self.last_applied_log_id.index + 1, leader_commit + 1)
                 .await?;
+            let update_membership = need_update_membership(&entries);
             self.state_machine.apply_entries(entries).await?;
             self.last_applied_log_id = self.state_machine.get_applied_log_id().await?;
             assert!(self.last_applied_log_id.index == leader_commit);
-            self.membership = self.state_machine.get_membership_config().await?;
+            if update_membership {
+                self.membership = self.state_machine.get_membership_config().await?;
+                self.target_state = if self.membership.all_members().contains(&self.id) {
+                    State::Follower
+                } else {
+                    State::NonVoter
+                };
+            }
         }
         Ok(AppendEntriesResponse {
             term: self.current_term,
             success: true,
+            conflict_opt: None,
         })
     }
 
@@ -377,7 +390,7 @@ enum ConsensusState {
     Uniform,
 }
 
-struct RaftLeader<'a, D, R, TR, LS, SM>
+struct LeaderState<'a, D, R, TR, LS, SM>
 where
     D: Data,
     R: Response,
@@ -395,7 +408,7 @@ where
     rx_replica: mpsc::UnboundedReceiver<ReplicationEvent>,
 }
 
-impl<'a, D, R, TR, LS, SM> RaftLeader<'a, D, R, TR, LS, SM>
+impl<'a, D, R, TR, LS, SM> LeaderState<'a, D, R, TR, LS, SM>
 where
     D: Data,
     R: Response,
@@ -418,6 +431,7 @@ where
     }
 
     pub(super) async fn run(mut self) -> Result<(), Error> {
+        slog::info!(self.node.logger, "Enter leader state"; slog::o!("term" => self.node.current_term));
         self.node.next_election_timeout = None;
         self.node.last_heartbeat = None;
         self.node.current_leader = Some(self.node.id);
@@ -635,34 +649,22 @@ where
         if match_index <= self.node.last_applied_log_id.index {
             return Ok(());
         }
-        slog::debug!(self.node.logger, "Match index"; slog::o!("match_index" => match_index));
+        self.commit_entries(match_index).await
+    }
+
+    async fn commit_entries(&mut self, commit_index: u64) -> Result<(), Error> {
+        if self.node.last_applied_log_id.index >= commit_index {
+            return Ok(());
+        }
         let entries = self
             .node
             .log_storage
-            .read_entries(self.node.last_applied_log_id.index + 1, match_index + 1)
+            .read_entries(self.node.last_applied_log_id.index + 1, commit_index + 1)
             .await?;
-        let update_membership = entries.iter().any(|entry| match entry.payload {
-            EntryPayload::ConfigChange(_) => true,
-            _ => false,
-        });
+        let update_membership = need_update_membership(&entries);
         let indexes: Vec<_> = entries.iter().map(|entry| entry.log_id.index).collect();
         let results = self.node.state_machine.apply_entries(entries).await?;
         assert!(results.len() == indexes.len());
-        if let Some(index) = indexes.last() {
-            let pos = self.awaiting_commit.partition_point(|(id, _)| id <= &index);
-            let mut it = 0usize;
-            for (id, tx) in self.awaiting_commit.drain(..pos) {
-                while it < results.len() && indexes[it] < id {
-                    it += 1
-                }
-                if indexes[it] == id {
-                    let _ = tx.send(Ok(results[it].clone()));
-                    it += 1
-                } else {
-                    unreachable!();
-                }
-            }
-        }
         self.node.last_applied_log_id = self.node.state_machine.get_applied_log_id().await?;
         if update_membership {
             self.node.membership = self.node.state_machine.get_membership_config().await?;
@@ -672,6 +674,35 @@ where
             let _ = node.tx.send(ReplicationMessage::Commit {
                 commit_index: self.node.last_applied_log_id.index,
             });
+        }
+        let index = match indexes.last() {
+            Some(index) => index,
+            None => unreachable!(),
+        };
+        let uncommited_pos = self.awaiting_commit.partition_point(|(id, _)| id <= &index);
+        let mut indexes = indexes.into_iter();
+        let mut results = results.into_iter();
+        let mut curr_index = indexes.next();
+        let mut curr_result = results.next();
+        for (id, tx) in self.awaiting_commit.drain(..uncommited_pos) {
+            while let Some(index) = curr_index {
+                if index >= id {
+                    break;
+                }
+                curr_index = indexes.next();
+                curr_result = results.next();
+            }
+            if let Some(index) = curr_index {
+                if index == id {
+                    let _ = tx.send(Ok(curr_result.take().unwrap()));
+                    curr_index = indexes.next();
+                    curr_result = results.next();
+                } else {
+                    unreachable!();
+                }
+            } else {
+                unreachable!();
+            }
         }
         Ok(())
     }
@@ -732,4 +763,11 @@ where
         node.handle.await??;
         Ok(())
     }
+}
+
+fn need_update_membership<D: Data>(entries: &Vec<Entry<D>>) -> bool {
+    entries.iter().any(|entry| match entry.payload {
+        EntryPayload::ConfigChange(_) => true,
+        _ => false,
+    })
 }
