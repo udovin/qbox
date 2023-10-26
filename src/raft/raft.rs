@@ -104,6 +104,13 @@ where
         Ok(rx.await??)
     }
 
+    pub async fn remove_node(&self, id: NodeId) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        let message = Message::RemoveNode { id, tx };
+        self.tx.send(message)?;
+        Ok(rx.await??)
+    }
+
     pub async fn write_data(&self, data: D) -> Result<R, Error> {
         let (tx, rx) = oneshot::channel();
         let message = Message::WriteEntry {

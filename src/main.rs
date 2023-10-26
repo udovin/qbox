@@ -104,6 +104,29 @@ where
     Ok(warp::reply::with_status("", warp::http::StatusCode::OK))
 }
 
+#[derive(Serialize, Deserialize)]
+struct RemoveNodeMessage {
+    id: NodeId,
+}
+
+async fn raft_remove_node_handle<R, TR, LS, SM>(
+    body: RemoveNodeMessage,
+    raft: Arc<Raft<Action, R, TR, LS, SM>>,
+) -> Result<impl warp::Reply, Infallible>
+where
+    R: Response + Serialize,
+    TR: Transport<Action>,
+    LS: LogStorage<Action>,
+    SM: StateMachine<Action, R>,
+{
+    let node = Action::Delete {
+        key: format!("nodes/{}", body.id),
+    };
+    raft.write_data(node).await.unwrap();
+    raft.remove_node(body.id).await.unwrap();
+    Ok(warp::reply::with_status("", warp::http::StatusCode::OK))
+}
+
 fn get_logger(node_id: u64) -> slog::Logger {
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
@@ -148,6 +171,14 @@ async fn async_server_main(args: ServerArgs) {
             .and(warp::any().map(move || raft.clone()))
             .and_then(raft_add_node_handle)
     };
+    let raft_remove_node_route = {
+        let raft = raft.clone();
+        warp::path("raft")
+            .and(warp::path("remove-node"))
+            .and(warp::body::json())
+            .and(warp::any().map(move || raft.clone()))
+            .and_then(raft_remove_node_handle)
+    };
     let log = {
         let logger = logger.clone();
         warp::log::custom(move |info| {
@@ -160,7 +191,10 @@ async fn async_server_main(args: ServerArgs) {
             );
         })
     };
-    let routes = raft_route.or(raft_add_node_route).with(log);
+    let routes = raft_route
+        .or(raft_add_node_route)
+        .or(raft_remove_node_route)
+        .with(log);
     let server = tokio::spawn(warp::serve(routes).run(args.addr));
     slog::info!(logger, "Initiaizing node");
     if let Some(addr) = args.join {
@@ -187,7 +221,7 @@ async fn async_server_main(args: ServerArgs) {
     }
     tokio::select! {
         _ = server => {}
-        _ = raft.join() => {}
+        result = raft.join() => result.unwrap()
     };
     raft.shutdown().await.unwrap();
 }

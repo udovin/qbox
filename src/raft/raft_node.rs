@@ -155,6 +155,9 @@ where
                     Message::AddNode{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
+                    Message::RemoveNode{tx, ..} => {
+                        let _ = tx.send(Err("node is not leader".into()));
+                    }
                     Message::WriteEntry{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
@@ -193,6 +196,9 @@ where
                     Message::AddNode{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
+                    Message::RemoveNode{tx, ..} => {
+                        let _ = tx.send(Err("node is not leader".into()));
+                    }
                     Message::WriteEntry{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
@@ -225,6 +231,9 @@ where
                         let _ = tx.send(self.handle_init_cluster().await);
                     }
                     Message::AddNode{tx, ..} => {
+                        let _ = tx.send(Err("node is not leader".into()));
+                    }
+                    Message::RemoveNode{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
                     Message::WriteEntry{tx, ..} => {
@@ -420,10 +429,17 @@ where
     }
 }
 
-struct ReplicationNode<D: Data> {
+struct ReplicationState<D: Data> {
     tx: mpsc::UnboundedSender<ReplicationMessage<D>>,
     handle: JoinHandle<Result<(), Error>>,
     match_log_id: LogId,
+}
+
+impl<D: Data> ReplicationState<D> {
+    async fn shutdown(self) -> Result<(), Error> {
+        self.tx.send(ReplicationMessage::Terminate)?;
+        Ok(self.handle.await??)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -442,7 +458,7 @@ where
     SM: StateMachine<D, R>,
 {
     node: &'a mut RaftNode<D, R, TR, LS, SM>,
-    nodes: HashMap<NodeId, ReplicationNode<D>>,
+    nodes: HashMap<NodeId, ReplicationState<D>>,
     consensus_state: ConsensusState,
     awaiting_commit: Vec<(u64, oneshot::Sender<Result<R, Error>>)>,
     awaiting_config_change: Option<oneshot::Sender<Result<(), Error>>>,
@@ -479,9 +495,12 @@ where
         self.node.last_heartbeat = None;
         self.node.current_leader = Some(self.node.id);
         self.commit_initial_leader_entry().await?;
-        self.update_replication().await?;
+        self.update_replication_start().await?;
         loop {
             if !matches!(self.node.target_state, State::Leader) {
+                for (_, node) in self.nodes.into_iter() {
+                    node.shutdown().await.unwrap();
+                }
                 return Ok(());
             }
             tokio::select! {
@@ -500,6 +519,9 @@ where
                     }
                     Message::AddNode{id, tx} => {
                         self.handle_add_node(id, tx).await;
+                    }
+                    Message::RemoveNode{id, tx} => {
+                        self.handle_remove_node(id, tx).await;
                     }
                     Message::WriteEntry{entry, tx} => {
                         self.handle_write_entry(entry, tx).await;
@@ -532,6 +554,15 @@ where
         let mut members = self.node.membership.members.clone();
         if !members.insert(id) {
             let _ = tx.send(Err(format!("cluster already has node {}", id).into()));
+            return;
+        }
+        self.handle_change_membership(members, tx).await;
+    }
+
+    async fn handle_remove_node(&mut self, id: NodeId, tx: oneshot::Sender<Result<(), Error>>) {
+        let mut members = self.node.membership.members.clone();
+        if !members.remove(&id) {
+            let _ = tx.send(Err(format!("cluster does not have node {}", id).into()));
             return;
         }
         self.handle_change_membership(members, tx).await;
@@ -629,7 +660,8 @@ where
                 .get_membership_config()
                 .await
                 .unwrap();
-            self.update_replication().await.unwrap();
+            self.update_replication_start().await.unwrap();
+            self.update_replication_finish().await.unwrap();
             let _ = tx.send(Ok(result.into_iter().next().unwrap()));
             return;
         }
@@ -674,7 +706,7 @@ where
         {
             let node = match self.nodes.get_mut(&node_id) {
                 Some(node) => node,
-                None => Err("cannot update match index")?,
+                None => return Ok(()),
             };
             node.match_log_id = log_id;
         }
@@ -708,12 +740,15 @@ where
         self.node.last_applied_log_id = self.node.state_machine.get_applied_log_id().await?;
         if update_membership {
             self.node.membership = self.node.state_machine.get_membership_config().await?;
-            self.update_replication().await?;
+            self.update_replication_start().await?;
         }
         for node in self.nodes.values() {
             let _ = node.tx.send(ReplicationMessage::Commit {
                 commit_index: self.node.last_applied_log_id.index,
             });
+        }
+        if update_membership {
+            self.update_replication_finish().await?;
         }
         let index = match indexes.last() {
             Some(index) => index,
@@ -747,7 +782,20 @@ where
         Ok(())
     }
 
-    async fn update_replication(&mut self) -> Result<(), Error> {
+    async fn update_replication_start(&mut self) -> Result<(), Error> {
+        let all_members = self.node.membership.all_members();
+        if !all_members.contains(&self.node.id) {
+            self.node.target_state = State::NonVoter;
+        }
+        for id in all_members {
+            if id != self.node.id && !self.nodes.contains_key(&id) {
+                self.start_replication(id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn update_replication_finish(&mut self) -> Result<(), Error> {
         let all_members = self.node.membership.all_members();
         let remove_ids: Vec<_> = self
             .nodes
@@ -757,11 +805,6 @@ where
             .collect();
         for id in remove_ids {
             self.stop_replication(id).await?;
-        }
-        for id in all_members {
-            if id != self.node.id && !self.nodes.contains_key(&id) {
-                self.start_replication(id).await?;
-            }
         }
         Ok(())
     }
@@ -781,9 +824,10 @@ where
             self.node.last_log_id.index,
             self.node.last_applied_log_id.index,
         );
+        slog::info!(self.node.logger, "Start replication"; slog::o!("target_id" => id));
         if let Some(_) = self.nodes.insert(
             id,
-            ReplicationNode {
+            ReplicationState {
                 tx,
                 handle,
                 match_log_id: LogId::default(),
@@ -795,13 +839,13 @@ where
     }
 
     async fn stop_replication(&mut self, id: u64) -> Result<(), Error> {
-        let node = match self.nodes.remove(&id) {
-            Some(node) => node,
+        match self.nodes.remove(&id) {
+            Some(node) => {
+                slog::info!(self.node.logger, "Stop replication"; slog::o!("target_id" => id));
+                node.shutdown().await
+            }
             None => unreachable!(),
-        };
-        node.tx.send(ReplicationMessage::Terminate)?;
-        node.handle.await??;
-        Ok(())
+        }
     }
 }
 

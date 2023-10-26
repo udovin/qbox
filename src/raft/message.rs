@@ -27,6 +27,10 @@ pub(super) enum Message<D: Data, R: Response> {
         id: NodeId,
         tx: oneshot::Sender<Result<(), Error>>,
     },
+    RemoveNode {
+        id: NodeId,
+        tx: oneshot::Sender<Result<(), Error>>,
+    },
     // Client messages.
     WriteEntry {
         entry: EntryPayload<D>,
