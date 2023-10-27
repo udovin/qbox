@@ -8,10 +8,10 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep_until;
 
 use super::{
-    AppendEntriesRequest, AppendEntriesResponse, Config, Data, Entry, EntryPayload, Error,
-    HardState, InstallSnapshotRequest, InstallSnapshotResponse, LeaderState, LogId, LogStorage,
-    MembershipConfig, Message, NodeId, RequestVoteRequest, RequestVoteResponse, Response,
-    StateMachine, Transport,
+    AppendEntriesRequest, AppendEntriesResponse, CandidateState, Config, Data, Entry, EntryPayload,
+    Error, HardState, InstallSnapshotRequest, InstallSnapshotResponse, LeaderState, LogId,
+    LogStorage, MembershipConfig, Message, NodeId, RequestVoteRequest, RequestVoteResponse,
+    Response, StateMachine, Transport,
 };
 
 pub(super) enum State {
@@ -116,51 +116,10 @@ where
         loop {
             match &self.target_state {
                 State::Leader => LeaderState::new(&mut self).run().await?,
-                State::Candidate => self.run_candidate().await?,
+                State::Candidate => CandidateState::new(&mut self).run().await?,
                 State::Follower => self.run_follower().await?,
                 State::NonVoter => self.run_non_voter().await?,
                 State::Shutdown => return Ok(()),
-            }
-        }
-    }
-
-    async fn run_candidate(&mut self) -> Result<(), Error> {
-        slog::info!(self.logger, "Enter candidate state"; slog::o!("term" => self.current_term));
-        let now = Instant::now();
-        self.next_election_timeout = Some(now + self.config.new_rand_election_timeout());
-        loop {
-            if !matches!(self.target_state, State::Candidate) {
-                return Ok(());
-            }
-            let election_timeout = sleep_until(self.next_election_timeout.unwrap().into());
-            tokio::select! {
-                _ = election_timeout => return Ok(()),
-                Some(message) = self.rx.recv() => match message {
-                    Message::AppendEntries{request, tx} => {
-                        let _ = tx.send(self.handle_append_entries(request).await);
-                    }
-                    Message::RequestVote{request, tx} => {
-                        let _ = tx.send(self.handle_request_vote(request).await);
-                    }
-                    Message::InstallSnapshot{request, tx} => {
-                        let _ = tx.send(self.handle_install_snapshot(request).await);
-                    }
-                    Message::InitCluster{tx, ..} => {
-                        let _ = tx.send(Err("node already initialized".into()));
-                    }
-                    Message::AddNode{tx, ..} => {
-                        let _ = tx.send(Err("node is not leader".into()));
-                    }
-                    Message::RemoveNode{tx, ..} => {
-                        let _ = tx.send(Err("node is not leader".into()));
-                    }
-                    Message::WriteEntry{tx, ..} => {
-                        let _ = tx.send(Err("node is not leader".into()));
-                    }
-                },
-                Ok(_) = &mut self.rx_shutdown => {
-                    self.target_state = State::Shutdown;
-                }
             }
         }
     }

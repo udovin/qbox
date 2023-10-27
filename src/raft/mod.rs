@@ -1,4 +1,6 @@
+mod candidate_state;
 mod config;
+mod leader_state;
 mod message;
 mod raft;
 mod raft_node;
@@ -6,7 +8,6 @@ mod replication;
 mod storage;
 mod transport;
 mod types;
-mod leader_state;
 
 pub mod mem_storage;
 pub mod tcp_transport;
@@ -19,6 +20,7 @@ pub use storage::*;
 pub use transport::*;
 pub use types::*;
 
+use candidate_state::*;
+use leader_state::*;
 use raft_node::*;
 use replication::*;
-use leader_state::*;
