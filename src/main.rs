@@ -43,7 +43,8 @@ struct EmptyData {}
 
 impl Data for EmptyData {}
 
-async fn get_node_id(dir: &Path) -> Result<u64, std::io::Error> {
+async fn get_node_id(args: &ServerArgs) -> Result<u64, std::io::Error> {
+    let dir = args.data_dir.as_path();
     let file_path = dir.join("node_id.bin");
     match File::open(file_path.clone()).await {
         Ok(mut file) => {
@@ -53,7 +54,11 @@ async fn get_node_id(dir: &Path) -> Result<u64, std::io::Error> {
         }
         Err(err) => match err.kind() {
             ErrorKind::NotFound => {
-                let id: u64 = thread_rng().gen();
+                let id: u64 = if args.init {
+                    1
+                } else {
+                    thread_rng().gen()
+                };
                 let mut file = File::create(file_path).await?;
                 file.write_all(id.to_le_bytes().as_slice()).await?;
                 Ok(id)
@@ -122,8 +127,8 @@ where
     let node = Action::Delete {
         key: format!("nodes/{}", body.id),
     };
-    raft.write_data(node).await.unwrap();
     raft.remove_node(body.id).await.unwrap();
+    raft.write_data(node).await.unwrap();
     Ok(warp::reply::with_status("", warp::http::StatusCode::OK))
 }
 
@@ -140,7 +145,7 @@ fn get_logger(node_id: u64) -> slog::Logger {
 
 async fn async_server_main(args: ServerArgs) {
     create_dir_all(args.data_dir.as_path()).await.unwrap();
-    let node_id = get_node_id(args.data_dir.as_path()).await.unwrap();
+    let node_id = get_node_id(&args).await.unwrap();
     let logger = get_logger(node_id);
     let config = Config::default();
     let log_storage = Arc::new(MemLogStorage::new());

@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::sleep_until;
+use tokio::time::{sleep_until, Sleep};
 
 use super::{
     AppendEntriesRequest, AppendEntriesResponse, CandidateState, Config, Data, Entry, EntryPayload,
@@ -44,7 +44,7 @@ where
     pub(super) membership: MembershipConfig,
     pub(super) last_applied_log_id: LogId,
     pub(super) target_state: State,
-    pub(super) next_election_timeout: Option<Instant>,
+    next_election_timeout: Option<Instant>,
     pub(super) last_heartbeat: Option<Instant>,
     pub(super) current_leader: Option<NodeId>,
 }
@@ -115,7 +115,7 @@ where
         }
         loop {
             match &self.target_state {
-                State::Leader => LeaderState::new(&mut self).run().await?,
+                State::Leader => self.run_leader().await?,
                 State::Candidate => CandidateState::new(&mut self).run().await?,
                 State::Follower => self.run_follower().await?,
                 State::NonVoter => self.run_non_voter().await?,
@@ -124,15 +124,20 @@ where
         }
     }
 
+    async fn run_leader(&mut self) -> Result<(), Error> {
+        self.next_election_timeout = None;
+        LeaderState::new(self).run().await
+    }
+
     async fn run_follower(&mut self) -> Result<(), Error> {
         slog::info!(self.logger, "Enter follower state"; slog::o!("term" => self.current_term));
         let now = Instant::now();
-        self.next_election_timeout = Some(now + self.config.new_rand_election_timeout());
+        self.update_election_timeout(now);
         loop {
             if !matches!(self.target_state, State::Follower) {
                 return Ok(());
             }
-            let election_timeout = sleep_until(self.next_election_timeout.unwrap().into());
+            let election_timeout = self.get_election_timeout();
             tokio::select! {
                 _ = election_timeout => self.target_state = State::Candidate,
                 Some(message) = self.rx.recv() => match message {
@@ -167,6 +172,7 @@ where
 
     async fn run_non_voter(&mut self) -> Result<(), Error> {
         slog::info!(self.logger, "Enter non voter state"; slog::o!("term" => self.current_term));
+        self.next_election_timeout = None;
         loop {
             if !matches!(self.target_state, State::NonVoter) {
                 return Ok(());
@@ -218,20 +224,20 @@ where
                 conflict_opt: None,
             });
         }
+        if matches!(self.target_state, State::Leader | State::Candidate) {
+            slog::info!(self.logger, "Switch to follower state");
+            self.target_state = State::Follower;
+        }
         let now = Instant::now();
-        self.next_election_timeout = Some(now + self.config.new_rand_election_timeout());
         self.last_heartbeat = Some(now);
-        if request.term != self.current_term {
-            self.current_term = request.term;
-            self.voted_for = None;
-            self.save_hard_state().await?;
+        if !matches!(self.target_state, State::NonVoter) {
+            self.update_election_timeout(now);
         }
         if Some(request.leader_id) != self.current_leader {
             self.current_leader = Some(request.leader_id);
         }
-        if matches!(self.target_state, State::Leader | State::Candidate) {
-            slog::info!(self.logger, "Switch to follower state");
-            self.target_state = State::Follower;
+        if request.term != self.current_term {
+            self.update_hard_state(request.term, None).await?;
         }
         if request.prev_log_id != self.last_log_id {
             let entries = self
@@ -274,12 +280,7 @@ where
             self.last_applied_log_id = self.state_machine.get_applied_log_id().await?;
             assert!(self.last_applied_log_id.index == leader_commit);
             if update_membership {
-                self.membership = self.state_machine.get_membership_config().await?;
-                self.target_state = if self.membership.all_members().contains(&self.id) {
-                    State::Follower
-                } else {
-                    State::NonVoter
-                };
+                self.update_membership().await?;
             }
         }
         Ok(AppendEntriesResponse {
@@ -305,10 +306,8 @@ where
                 slog::info!(self.logger, "Switch to follower state");
                 self.target_state = State::Follower;
             }
-            self.next_election_timeout = Some(now + self.config.new_rand_election_timeout());
-            self.current_term = request.term;
-            self.voted_for = None;
-            self.save_hard_state().await?;
+            self.update_election_timeout(now);
+            self.update_hard_state(request.term, None).await?;
         }
         if request.last_log_id.term < self.last_log_id.term
             || request.last_log_id.index < self.last_log_id.index
@@ -328,10 +327,9 @@ where
                     slog::info!(self.logger, "Switch to follower state");
                     self.target_state = State::Follower;
                 }
-                self.next_election_timeout = Some(now + self.config.new_rand_election_timeout());
-                self.current_term = request.term;
-                self.voted_for = Some(request.candidate_id);
-                self.save_hard_state().await?;
+                self.update_election_timeout(now);
+                self.update_hard_state(request.term, Some(request.candidate_id))
+                    .await?;
                 Ok(RequestVoteResponse {
                     term: self.current_term,
                     vote_granted: true,
@@ -357,22 +355,56 @@ where
             members,
             members_after_consensus: None,
         };
-        self.current_term = 1;
-        self.voted_for = Some(self.id);
+        self.update_hard_state(1, Some(self.id)).await?;
         self.target_state = State::Leader;
-        self.save_hard_state().await?;
         Ok(())
     }
 
-    pub(super) async fn save_hard_state(&mut self) -> Result<(), Error> {
-        let hs = HardState {
-            current_term: self.current_term,
-            voted_for: self.voted_for,
-        };
-        self.state_machine.save_hard_state(hs).await
+    pub(super) fn update_election_timeout(&mut self, now: Instant) {
+        assert!(!matches!(self.target_state, State::Leader | State::NonVoter));
+        self.next_election_timeout = Some(now + self.config.new_rand_election_timeout());
     }
 
-    pub(super) async fn append_entry(
+    pub(super) fn get_election_timeout(&mut self) -> Sleep {
+        sleep_until(self.next_election_timeout.unwrap().into())
+    }
+
+    pub(super) async fn update_membership(&mut self) -> Result<(), Error> {
+        self.membership = self.state_machine.get_membership_config().await?;
+        if !self.membership.contains(&self.id) {
+            // Switch to non voter if current node is not in cluster membership.
+            self.target_state = State::NonVoter;
+        } else if matches!(self.target_state, State::NonVoter) {
+            // Switch to follower if current node is in cluster membership.
+            self.target_state = State::Follower;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn update_hard_state(
+        &mut self,
+        current_term: u64,
+        voted_for: Option<NodeId>,
+    ) -> Result<(), Error> {
+        // Current term cannot be decreased.
+        assert!(current_term >= self.current_term);
+        // We cannot change vote in current term.
+        assert!(
+            current_term != self.current_term
+                || self.voted_for.is_none()
+                || self.voted_for == voted_for
+        );
+        let hard_state = HardState {
+            current_term,
+            voted_for,
+        };
+        self.state_machine.save_hard_state(hard_state).await?;
+        self.current_term = current_term;
+        self.voted_for = voted_for;
+        Ok(())
+    }
+
+    pub(super) async fn append_entry_payload(
         &mut self,
         payload: EntryPayload<D>,
     ) -> Result<Entry<D>, Error> {

@@ -1,7 +1,5 @@
 use std::time::Instant;
 
-use tokio::time::sleep_until;
-
 use super::{Data, Error, LogStorage, Message, RaftNode, Response, State, StateMachine, Transport};
 
 pub(super) struct CandidateState<'a, D, R, TR, LS, SM>
@@ -30,12 +28,12 @@ where
     pub(super) async fn run(mut self) -> Result<(), Error> {
         slog::info!(self.node.logger, "Enter candidate state"; slog::o!("term" => self.node.current_term));
         let now = Instant::now();
-        self.node.next_election_timeout = Some(now + self.node.config.new_rand_election_timeout());
+        self.node.update_election_timeout(now);
         loop {
             if !matches!(self.node.target_state, State::Candidate) {
                 return Ok(());
             }
-            let election_timeout = sleep_until(self.node.next_election_timeout.unwrap().into());
+            let election_timeout = self.node.get_election_timeout();
             tokio::select! {
                 _ = election_timeout => return Ok(()),
                 Some(message) = self.node.rx.recv() => match message {

@@ -118,6 +118,14 @@ pub struct MembershipConfig {
 }
 
 impl MembershipConfig {
+    pub fn contains(&self, id: &NodeId) -> bool {
+        self.members.contains(id)
+            || match self.members_after_consensus.as_ref() {
+                Some(members) => members.contains(id),
+                None => false,
+            }
+    }
+
     pub fn all_members(&self) -> HashSet<NodeId> {
         let mut all_members = self.members.clone();
         if let Some(members) = &self.members_after_consensus {

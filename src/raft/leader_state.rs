@@ -77,7 +77,6 @@ where
 
     pub(super) async fn run(mut self) -> Result<(), Error> {
         slog::info!(self.node.logger, "Enter leader state"; slog::o!("term" => self.node.current_term));
-        self.node.next_election_timeout = None;
         self.node.last_heartbeat = None;
         self.node.current_leader = Some(self.node.id);
         self.commit_initial_leader_entry().await?;
@@ -215,7 +214,7 @@ where
         entry: EntryPayload<D>,
         tx: oneshot::Sender<Result<R, Error>>,
     ) {
-        let entry = match self.node.append_entry(entry).await {
+        let entry = match self.node.append_entry_payload(entry).await {
             Ok(entry) => entry,
             Err(err) => {
                 let _ = tx.send(Err(err.into()));
@@ -268,7 +267,7 @@ where
                 membership: self.node.membership.clone(),
             });
         }
-        self.node.append_entry(payload).await?;
+        self.node.append_entry_payload(payload).await?;
         Ok(())
     }
 
@@ -278,9 +277,7 @@ where
         }
         slog::info!(self.node.logger, "Switch to follower state");
         self.node.target_state = State::Follower;
-        self.node.current_term = term;
-        self.node.voted_for = None;
-        self.node.save_hard_state().await?;
+        self.node.update_hard_state(term, None).await?;
         Ok(())
     }
 
@@ -325,7 +322,7 @@ where
         assert!(results.len() == indexes.len());
         self.node.last_applied_log_id = self.node.state_machine.get_applied_log_id().await?;
         if update_membership {
-            self.node.membership = self.node.state_machine.get_membership_config().await?;
+            self.node.update_membership().await?;
             self.update_replication_start().await?;
         }
         for node in self.nodes.values() {
@@ -369,11 +366,7 @@ where
     }
 
     async fn update_replication_start(&mut self) -> Result<(), Error> {
-        let all_members = self.node.membership.all_members();
-        if !all_members.contains(&self.node.id) {
-            self.node.target_state = State::NonVoter;
-        }
-        for id in all_members {
+        for id in self.node.membership.all_members() {
             if id != self.node.id && !self.nodes.contains_key(&id) {
                 self.start_replication(id).await?;
             }
