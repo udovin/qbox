@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use serde::{Deserialize, Serialize};
 
 use super::{Data, Entry, Error, LogId, MembershipConfig, Response};
@@ -14,30 +16,42 @@ pub struct HardState {
     pub voted_for: Option<u64>,
 }
 
-#[async_trait::async_trait]
 pub trait LogStorage<D: Data>: Send + Sync + 'static {
-    async fn get_log_state(&self) -> Result<LogState, Error>;
+    fn get_log_state(&self) -> impl Future<Output = Result<LogState, Error>> + Send;
 
-    async fn read_entries(&self, from: u64, to: u64) -> Result<Vec<Entry<D>>, Error>;
+    fn read_entries(
+        &self,
+        begin: u64,
+        end: u64,
+    ) -> impl Future<Output = Result<Vec<Entry<D>>, Error>> + Send;
 
-    async fn append_entries(&self, entries: Vec<Entry<D>>) -> Result<(), Error>;
+    fn append_entries(
+        &self,
+        entries: Vec<Entry<D>>,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
-    // Purge logs up to `index`, inclusive (`entry.index` <= `index`).
-    async fn purge(&self, index: u64) -> Result<(), Error>;
+    // Purge logs up to `index`, exclusive (`entry.index` < `index`).
+    fn purge(&self, end: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
     // Truncate logs since `index`, inclusive (`entry.index` >= `index`).
-    async fn truncate(&self, index: u64) -> Result<(), Error>;
+    fn truncate(&self, begin: u64) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
-#[async_trait::async_trait]
 pub trait StateMachine<D: Data, R: Response>: Send + Sync + 'static {
-    async fn get_applied_log_id(&self) -> Result<LogId, Error>;
+    fn get_applied_log_id(&self) -> impl Future<Output = Result<LogId, Error>> + Send;
 
-    async fn get_membership_config(&self) -> Result<MembershipConfig, Error>;
+    fn get_membership_config(&self)
+        -> impl Future<Output = Result<MembershipConfig, Error>> + Send;
 
-    async fn apply_entries(&self, entires: Vec<Entry<D>>) -> Result<Vec<R>, Error>;
+    fn apply_entries(
+        &self,
+        entires: Vec<Entry<D>>,
+    ) -> impl Future<Output = Result<Vec<R>, Error>> + Send;
 
-    async fn get_hard_state(&self) -> Result<HardState, Error>;
+    fn get_hard_state(&self) -> impl Future<Output = Result<HardState, Error>> + Send;
 
-    async fn save_hard_state(&self, hard_state: HardState) -> Result<(), Error>;
+    fn save_hard_state(
+        &self,
+        hard_state: HardState,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 }

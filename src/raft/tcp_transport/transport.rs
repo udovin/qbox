@@ -1,9 +1,9 @@
-use serde::de::DeserializeOwned;
-use serde::ser::Serialize;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use serde::de::DeserializeOwned;
+use serde::ser::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -39,7 +39,6 @@ impl<D: Data + Serialize> TcpConnection<D> {
     }
 }
 
-#[async_trait::async_trait]
 impl<D: Data + Serialize> Connection<D> for TcpConnection<D> {
     async fn append_entries(
         &mut self,
@@ -130,7 +129,6 @@ impl<NM: NodeMetaStorage<SocketAddr>> TcpTransport<NM> {
     }
 }
 
-#[async_trait::async_trait]
 impl<D, NM> Transport<D> for TcpTransport<NM>
 where
     D: Data + Serialize,

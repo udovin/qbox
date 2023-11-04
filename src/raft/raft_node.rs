@@ -98,9 +98,15 @@ where
         self.membership = self.state_machine.get_membership_config().await?;
         self.last_applied_log_id = self.state_machine.get_applied_log_id().await?;
         if self.last_log_id.index < self.last_applied_log_id.index {
+            self.log_storage
+                .append_entries(vec![Entry {
+                    log_id: self.last_applied_log_id,
+                    payload: EntryPayload::Blank,
+                }])
+                .await?;
             // Remove gap in log storage.
             self.log_storage
-                .purge(self.last_applied_log_id.index)
+                .purge(self.last_applied_log_id.index + 1)
                 .await?;
             self.last_log_id = self.last_applied_log_id;
         }
@@ -361,7 +367,10 @@ where
     }
 
     pub(super) fn update_election_timeout(&mut self, now: Instant) {
-        assert!(!matches!(self.target_state, State::Leader | State::NonVoter));
+        assert!(!matches!(
+            self.target_state,
+            State::Leader | State::NonVoter
+        ));
         self.next_election_timeout = Some(now + self.config.new_rand_election_timeout());
     }
 

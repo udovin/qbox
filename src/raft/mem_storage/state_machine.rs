@@ -54,7 +54,6 @@ impl MemStateMachine {
     }
 }
 
-#[async_trait::async_trait]
 impl StateMachine<Action, ActionResponse> for MemStateMachine {
     async fn get_applied_log_id(&self) -> Result<LogId, Error> {
         let inner = self.inner.read().await;
@@ -103,7 +102,6 @@ impl StateMachine<Action, ActionResponse> for MemStateMachine {
     }
 }
 
-#[async_trait::async_trait]
 impl NodeMetaStorage<SocketAddr> for MemStateMachine {
     async fn get_node_meta(&self, id: NodeId) -> Result<SocketAddr, Error> {
         match self.get(&format!("nodes/{}", id)).await {

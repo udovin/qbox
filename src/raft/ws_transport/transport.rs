@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::{marker::PhantomData, net::SocketAddr};
 
@@ -15,9 +16,8 @@ use crate::raft::{
     Response, StateMachine, Transport,
 };
 
-#[async_trait::async_trait]
 pub trait NodeMetaStorage<D>: Send + Sync + 'static {
-    async fn get_node_meta(&self, id: NodeId) -> Result<D, Error>;
+    fn get_node_meta(&self, id: NodeId) -> impl Future<Output = Result<D, Error>> + Send;
 }
 
 #[derive(Serialize, Deserialize)]
@@ -38,7 +38,6 @@ pub struct WsConnection<D: Data> {
     _phantom: PhantomData<D>,
 }
 
-#[async_trait::async_trait]
 impl<D: Data + Serialize> Connection<D> for WsConnection<D> {
     async fn append_entries(
         &mut self,
@@ -111,7 +110,6 @@ impl<NM: NodeMetaStorage<SocketAddr>> WsTransport<NM> {
     }
 }
 
-#[async_trait::async_trait]
 impl<D, NM> Transport<D> for WsTransport<NM>
 where
     D: Data + Serialize,

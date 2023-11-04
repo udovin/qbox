@@ -1,19 +1,21 @@
+use std::convert::Infallible;
+use std::io::ErrorKind;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use clap::{Args, Parser, Subcommand};
-use qbox::raft::mem_storage::{Action, MemLogStorage, MemStateMachine};
-use qbox::raft::ws_transport::{handle_connection, WsTransport};
-use qbox::raft::{Config, Data, LogStorage, NodeId, Raft, Response, StateMachine, Transport};
 use rand::{thread_rng, Rng};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use slog::Drain;
-use std::convert::Infallible;
-use std::io::ErrorKind;
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use tokio::fs::{create_dir_all, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use warp::Filter;
+
+use qbox::raft::mem_storage::{Action, MemLogStorage, MemStateMachine};
+use qbox::raft::ws_transport::{handle_connection, WsTransport};
+use qbox::raft::{Config, Data, LogStorage, NodeId, Raft, Response, StateMachine, Transport};
 
 #[derive(Args, Debug)]
 struct ServerArgs {
@@ -54,11 +56,7 @@ async fn get_node_id(args: &ServerArgs) -> Result<u64, std::io::Error> {
         }
         Err(err) => match err.kind() {
             ErrorKind::NotFound => {
-                let id: u64 = if args.init {
-                    1
-                } else {
-                    thread_rng().gen()
-                };
+                let id: u64 = if args.init { 1 } else { thread_rng().gen() };
                 let mut file = File::create(file_path).await?;
                 file.write_all(id.to_le_bytes().as_slice()).await?;
                 Ok(id)

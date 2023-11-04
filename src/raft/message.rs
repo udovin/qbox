@@ -82,7 +82,7 @@ pub struct RequestVoteResponse {
     pub vote_granted: bool,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Serialize, Deserialize, Debug)]
 pub struct LogId {
     pub index: u64,
     pub term: u64,
