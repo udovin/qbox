@@ -1,5 +1,10 @@
 use std::time::Instant;
 
+use futures_util::stream::FuturesOrdered;
+use futures_util::StreamExt;
+
+use crate::raft::{Connection, RequestVoteRequest};
+
 use super::{Data, Error, LogStorage, Message, RaftNode, Response, State, StateMachine, Transport};
 
 pub(super) struct CandidateState<'a, D, R, TR, LS, SM>
@@ -25,10 +30,37 @@ where
         Self { node }
     }
 
-    pub(super) async fn run(mut self) -> Result<(), Error> {
+    pub(super) async fn run(self) -> Result<(), Error> {
         slog::info!(self.node.logger, "Enter candidate state"; slog::o!("term" => self.node.current_term));
         let now = Instant::now();
         self.node.update_election_timeout(now);
+        self.node
+            .update_hard_state(self.node.current_term + 1, None)
+            .await?;
+        let members = self.node.membership.all_members();
+        let mut vote_responses = FuturesOrdered::new();
+        let mut vote_grants = 1;
+        for member in members.iter() {
+            if member == &self.node.id {
+                continue;
+            }
+            let term = self.node.current_term;
+            let candidate_id = self.node.id;
+            let last_log_id = self.node.last_log_id;
+            let transport = self.node.transport.clone();
+            let member = *member;
+            let join_handle = tokio::spawn(async move {
+                let mut connection = transport.connect(member).await?;
+                connection
+                    .request_vote(RequestVoteRequest {
+                        term,
+                        candidate_id,
+                        last_log_id,
+                    })
+                    .await
+            });
+            vote_responses.push_back(join_handle);
+        }
         loop {
             if !matches!(self.node.target_state, State::Candidate) {
                 return Ok(());
@@ -58,6 +90,22 @@ where
                     Message::WriteEntry{tx, ..} => {
                         let _ = tx.send(Err("node is not leader".into()));
                     }
+                },
+                Some(result) = vote_responses.next() => match result? {
+                    Ok(result) => {
+                        if result.vote_granted {
+                            assert!(result.term == self.node.current_term);
+                            vote_grants += 1;
+                            if vote_grants > members.len() / 2 {
+                                self.node.target_state = State::Leader;
+                                return Ok(())
+                            }
+                        }
+                        self.node.update_hard_state(result.term, None).await?;
+                        self.node.target_state = State::Follower;
+                        return Ok(());
+                    },
+                    Err(_) => {},
                 },
                 Ok(_) = &mut self.node.rx_shutdown => {
                     self.node.target_state = State::Shutdown;
