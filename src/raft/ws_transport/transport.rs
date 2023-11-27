@@ -136,7 +136,7 @@ pub async fn handle_connection<D, R, TR, LS, SM>(
 ) -> Result<(), Error>
 where
     D: Data + DeserializeOwned,
-    R: Response + Serialize,
+    R: Response,
     TR: Transport<D>,
     LS: LogStorage<D>,
     SM: StateMachine<D, R>,

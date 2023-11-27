@@ -5,8 +5,7 @@ use std::sync::Arc;
 use serde::de::DeserializeOwned;
 use serde::ser::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::task::JoinHandle;
+use tokio::net::TcpStream;
 
 use crate::raft::ws_transport::NodeMetaStorage;
 use crate::raft::{
@@ -73,60 +72,6 @@ impl<NM: NodeMetaStorage<SocketAddr>> TcpTransport<NM> {
     pub fn new(storage: Arc<NM>) -> Self {
         Self { storage }
     }
-
-    pub fn spawn<D, R, LS, SM>(
-        addr: SocketAddr,
-        raft: Arc<Raft<D, R, Self, LS, SM>>,
-    ) -> JoinHandle<Result<(), Error>>
-    where
-        D: Data + Serialize + DeserializeOwned,
-        R: Response,
-        LS: LogStorage<D>,
-        SM: StateMachine<D, R>,
-    {
-        let server = async move {
-            let listener = TcpListener::bind(addr).await?;
-            loop {
-                let (stream, _) = listener.accept().await?;
-                tokio::spawn(Self::handle_connection(stream, raft.clone()));
-            }
-        };
-        tokio::spawn(server)
-    }
-
-    async fn handle_connection<D, R, LS, SM>(
-        mut stream: TcpStream,
-        raft: Arc<Raft<D, R, Self, LS, SM>>,
-    ) -> Result<(), Error>
-    where
-        D: Data + Serialize + DeserializeOwned,
-        R: Response,
-        LS: LogStorage<D>,
-        SM: StateMachine<D, R>,
-    {
-        loop {
-            let read_kind = stream.read_u64().await?;
-            match read_kind {
-                APPEND_ENTRIES => {
-                    let response = raft
-                        .append_entries(read_message(&mut stream).await?)
-                        .await?;
-                    write_message(&mut stream, APPEND_ENTRIES, response).await?;
-                }
-                INSTALL_SNAPSHOT => {
-                    let response = raft
-                        .install_snapshot(read_message(&mut stream).await?)
-                        .await?;
-                    write_message(&mut stream, INSTALL_SNAPSHOT, response).await?;
-                }
-                REQUEST_VOTE => {
-                    let response = raft.request_vote(read_message(&mut stream).await?).await?;
-                    write_message(&mut stream, REQUEST_VOTE, response).await?;
-                }
-                kind => Err(format!("unsupported message: {}", kind))?,
-            }
-        }
-    }
 }
 
 impl<D, NM> Transport<D> for TcpTransport<NM>
@@ -171,4 +116,39 @@ async fn write_message<S: Unpin + AsyncWriteExt, T: Serialize>(
     stream.write_u64(kind).await?;
     stream.write_u64(len).await?;
     Ok(stream.write_all(bytes.as_slice()).await?)
+}
+
+pub async fn handle_connection<D, R, TR, LS, SM>(
+    mut stream: TcpStream,
+    raft: Arc<Raft<D, R, TR, LS, SM>>,
+) -> Result<(), Error>
+where
+    D: Data + DeserializeOwned,
+    R: Response,
+    TR: Transport<D>,
+    LS: LogStorage<D>,
+    SM: StateMachine<D, R>,
+{
+    loop {
+        let read_kind = stream.read_u64().await?;
+        match read_kind {
+            APPEND_ENTRIES => {
+                let response = raft
+                    .append_entries(read_message(&mut stream).await?)
+                    .await?;
+                write_message(&mut stream, APPEND_ENTRIES, response).await?;
+            }
+            INSTALL_SNAPSHOT => {
+                let response = raft
+                    .install_snapshot(read_message(&mut stream).await?)
+                    .await?;
+                write_message(&mut stream, INSTALL_SNAPSHOT, response).await?;
+            }
+            REQUEST_VOTE => {
+                let response = raft.request_vote(read_message(&mut stream).await?).await?;
+                write_message(&mut stream, REQUEST_VOTE, response).await?;
+            }
+            kind => Err(format!("unsupported message: {}", kind))?,
+        }
+    }
 }
