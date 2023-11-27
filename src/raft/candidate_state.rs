@@ -31,11 +31,8 @@ where
     }
 
     pub(super) async fn run(self) -> Result<(), Error> {
-        slog::info!(self.node.logger, "Enter candidate state"; slog::o!("term" => self.node.current_term));
-        let now = Instant::now();
-        self.node.update_election_timeout(now);
         self.node
-            .update_hard_state(self.node.current_term + 1, None)
+            .update_hard_state(self.node.current_term + 1, Some(self.node.id))
             .await?;
         let members = self.node.membership.all_members();
         let mut vote_responses = FuturesOrdered::new();

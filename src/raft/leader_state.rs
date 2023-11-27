@@ -1,3 +1,4 @@
+use std::cmp::min;
 use std::collections::{HashMap, HashSet};
 use std::iter::once;
 use std::sync::Arc;
@@ -76,7 +77,6 @@ where
     }
 
     pub(super) async fn run(mut self) -> Result<(), Error> {
-        slog::info!(self.node.logger, "Enter leader state"; slog::o!("term" => self.node.current_term));
         self.node.last_heartbeat = None;
         self.node.current_leader = Some(self.node.id);
         self.commit_initial_leader_entry().await?;
@@ -286,29 +286,36 @@ where
         node_id: NodeId,
         log_id: LogId,
     ) -> Result<(), Error> {
-        {
-            let node = match self.nodes.get_mut(&node_id) {
-                Some(node) => node,
-                None => return Ok(()),
-            };
-            node.match_log_id = log_id;
+        match self.nodes.get_mut(&node_id) {
+            Some(node) => node.match_log_id = log_id,
+            None => unreachable!(),
+        };
+        let members = &self.node.membership.members;
+        let mut commit_index = calculate_commit_index(
+            self.nodes
+                .iter()
+                .filter(|node| members.contains(node.0))
+                .map(|node| node.1.match_log_id.index)
+                .chain(once(self.node.last_log_id.index))
+                .collect(),
+        );
+        if let Some(members) = &self.node.membership.members_after_consensus {
+            let mut indexes: Vec<_> = self
+                .nodes
+                .iter()
+                .filter(|node| members.contains(node.0))
+                .map(|node| node.1.match_log_id.index)
+                .collect();
+            if members.contains(&self.node.id) {
+                indexes.push(self.node.last_log_id.index);
+            }
+            commit_index = min(commit_index, calculate_commit_index(indexes));
         }
-        let mut all_indexes: Vec<_> = self
-            .nodes
-            .iter()
-            .map(|node| node.1.match_log_id.index)
-            .chain(once(self.node.last_applied_log_id.index))
-            .collect();
-        let (_, match_index, _) = all_indexes.select_nth_unstable((self.nodes.len() + 1) / 2);
-        let match_index = *match_index;
-        if match_index <= self.node.last_applied_log_id.index {
-            return Ok(());
-        }
-        self.commit_entries(match_index).await
+        self.commit_entries(commit_index).await
     }
 
     async fn commit_entries(&mut self, commit_index: u64) -> Result<(), Error> {
-        if self.node.last_applied_log_id.index >= commit_index {
+        if commit_index <= self.node.last_applied_log_id.index {
             return Ok(());
         }
         let entries = self
@@ -427,4 +434,10 @@ where
             None => unreachable!(),
         }
     }
+}
+
+fn calculate_commit_index(mut indexes: Vec<u64>) -> u64 {
+    let len = indexes.len();
+    let (_, commit_index, _) = indexes.select_nth_unstable(len / 2);
+    *commit_index
 }

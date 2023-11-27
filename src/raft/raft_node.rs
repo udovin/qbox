@@ -122,7 +122,7 @@ where
         loop {
             match &self.target_state {
                 State::Leader => self.run_leader().await?,
-                State::Candidate => CandidateState::new(&mut self).run().await?,
+                State::Candidate => self.run_candidate().await?,
                 State::Follower => self.run_follower().await?,
                 State::NonVoter => self.run_non_voter().await?,
                 State::Shutdown => return Ok(()),
@@ -131,14 +131,20 @@ where
     }
 
     async fn run_leader(&mut self) -> Result<(), Error> {
+        slog::info!(self.logger, "Enter leader state"; slog::o!("term" => self.current_term));
         self.next_election_timeout = None;
         LeaderState::new(self).run().await
     }
 
+    async fn run_candidate(&mut self) -> Result<(), Error> {
+        slog::info!(self.logger, "Enter candidate state"; slog::o!("term" => self.current_term));
+        self.update_election_timeout(Instant::now());
+        CandidateState::new(self).run().await
+    }
+
     async fn run_follower(&mut self) -> Result<(), Error> {
         slog::info!(self.logger, "Enter follower state"; slog::o!("term" => self.current_term));
-        let now = Instant::now();
-        self.update_election_timeout(now);
+        self.update_election_timeout(Instant::now());
         loop {
             if !matches!(self.target_state, State::Follower) {
                 return Ok(());
@@ -346,8 +352,14 @@ where
 
     pub(super) async fn handle_install_snapshot(
         &mut self,
-        _request: InstallSnapshotRequest,
+        request: InstallSnapshotRequest,
     ) -> Result<InstallSnapshotResponse, Error> {
+        if request.term < self.current_term {
+            return Ok(InstallSnapshotResponse {
+                term: self.current_term,
+                success: false,
+            });
+        }
         todo!()
     }
 
@@ -366,7 +378,7 @@ where
         Ok(())
     }
 
-    pub(super) fn update_election_timeout(&mut self, now: Instant) {
+    fn update_election_timeout(&mut self, now: Instant) {
         assert!(!matches!(
             self.target_state,
             State::Leader | State::NonVoter

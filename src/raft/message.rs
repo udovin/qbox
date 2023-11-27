@@ -67,6 +67,7 @@ pub struct InstallSnapshotRequest {
 #[derive(Serialize, Deserialize)]
 pub struct InstallSnapshotResponse {
     pub term: u64,
+    pub success: bool,
 }
 
 #[derive(Serialize, Deserialize)]
