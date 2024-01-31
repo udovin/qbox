@@ -25,7 +25,7 @@ impl<D: Data> MemLogStorage<D> {
     }
 }
 
-impl<D: Data + Clone> LogStorage<D> for MemLogStorage<D> {
+impl<D: Data> LogStorage<D> for MemLogStorage<D> {
     async fn get_log_state(&self) -> Result<LogState, Error> {
         let inner = self.inner.read().await;
         let last_log_id = match inner.logs.last_key_value() {

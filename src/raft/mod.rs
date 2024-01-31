@@ -10,6 +10,7 @@ mod transport;
 mod types;
 
 pub mod mem_storage;
+pub mod persistent_storage;
 pub mod tcp_transport;
 pub mod ws_transport;
 

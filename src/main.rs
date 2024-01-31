@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use clap::{Args, Parser, Subcommand};
 use rand::{thread_rng, Rng};
+use sbox::Manager;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use slog::Drain;
@@ -32,6 +33,8 @@ struct ServerArgs {
 #[derive(Subcommand, Debug)]
 enum Command {
     Server(ServerArgs),
+    #[clap(hide = true)]
+    InitProcess,
 }
 
 #[derive(Parser, Debug)]
@@ -237,9 +240,14 @@ fn server_main(args: ServerArgs) {
         .block_on(async_server_main(args));
 }
 
+fn init_process_main() {
+    Manager::start_init_process();
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
         Command::Server(args) => server_main(args),
+        Command::InitProcess => init_process_main(),
     }
 }
